@@ -29,17 +29,23 @@ const corsOptions = {
       ...envOrigins
     ];
 
-    // Allow any localhost or 127.0.0.1 port for local development
-    const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(cleanOrigin);
+    // Allow any localhost, 127.0.0.1, [::1], or 0.0.0.0 on any port for local development
+    const isLocalhost = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0)(:\d+)?$/.test(cleanOrigin);
 
-    // Allow Netlify & Vercel deployments / preview domains
+    // Allow local LAN IPs (e.g. testing on mobile/network)
+    const isLocalIP = /^https?:\/\/(192\.168\.\d+\.\d+|10\.\d+\.\d+\.\d+|172\.(1[6-9]|2\d|3[0-1])\.\d+\.\d+)(:\d+)?$/.test(cleanOrigin);
+
+    // Allow Netlify, Vercel & Railway deployments / preview domains
     const isNetlify = /^https:\/\/[a-zA-Z0-9_.-]+\.netlify\.app$/.test(cleanOrigin);
     const isVercel = /^https:\/\/[a-zA-Z0-9_.-]+\.vercel\.app$/.test(cleanOrigin);
+    const isRailway = /^https:\/\/[a-zA-Z0-9_.-]+\.railway\.app$/.test(cleanOrigin) || /^https:\/\/[a-zA-Z0-9_.-]+\.up\.railway\.app$/.test(cleanOrigin);
 
     if (
       isLocalhost ||
+      isLocalIP ||
       isNetlify ||
       isVercel ||
+      isRailway ||
       allowedOrigins.includes(cleanOrigin) ||
       allowedOrigins.includes('*')
     ) {
@@ -56,6 +62,10 @@ const corsOptions = {
     'X-Requested-With',
     'Accept',
     'Origin',
+    'Cache-Control',
+    'Pragma',
+    'Expires',
+    'Range',
     'x-tenant-id',
     'x-company-id',
     'x-access-token'
@@ -66,6 +76,7 @@ const corsOptions = {
 };
 
 app.use(cors(corsOptions));
+app.options(/(.*)/, cors(corsOptions));
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ limit: '50mb', extended: true }));

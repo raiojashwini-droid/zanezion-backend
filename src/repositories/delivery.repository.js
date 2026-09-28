@@ -97,7 +97,7 @@ export const findAllDeliveries = async (tenantId, query) => {
       orderBy: { createdAt: 'desc' },
       include: {
         client: { select: { companyName: true } },
-        order: { select: { orderNumber: true } },
+        order: { select: { id: true, orderNumber: true, orderType: true, metadata: true } },
         assignee: { select: { firstName: true, lastName: true, userId: true } },
         items: { include: { item: true } },
         proofs: true
@@ -106,7 +106,31 @@ export const findAllDeliveries = async (tenantId, query) => {
     prisma.delivery.count({ where })
   ]);
 
-  return { deliveries, total, page: Number(page), totalPages: Math.ceil(total / limit) };
+  const enrichedDeliveries = deliveries.map(d => {
+    let meta = {};
+    if (d.order?.metadata) {
+      meta = typeof d.order.metadata === 'string' ? JSON.parse(d.order.metadata) : (d.order.metadata || {});
+    }
+    const resolvedVehicleRef = d.vehicleRef || meta.plateNumber || meta.vehicleId || meta.vehicle || null;
+    let resolvedAssignee = d.assignee;
+    if (!resolvedAssignee && meta.driverName) {
+      const nameParts = String(meta.driverName).trim().split(' ');
+      resolvedAssignee = {
+        firstName: nameParts[0] || 'Assigned',
+        lastName: nameParts.slice(1).join(' ') || 'Driver',
+        userId: meta.driver_user_id || meta.driverId || null
+      };
+    }
+    return {
+      ...d,
+      vehicleRef: resolvedVehicleRef,
+      plateNumber: resolvedVehicleRef,
+      assignee: resolvedAssignee,
+      driverName: resolvedAssignee ? `${resolvedAssignee.firstName || ''} ${resolvedAssignee.lastName || ''}`.trim() : (meta.driverName || null)
+    };
+  });
+
+  return { deliveries: enrichedDeliveries, total, page: Number(page), totalPages: Math.ceil(total / limit) };
 };
 
 export const updateDeliveryStatus = async (tx, id, status, extraData = {}) => {

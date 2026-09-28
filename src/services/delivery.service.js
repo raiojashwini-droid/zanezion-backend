@@ -362,10 +362,27 @@ export const getDeliveries = async (tenantId, query) => {
 };
 
 export const getDeliveryById = async (id, tenantId, clientId = null) => {
-  let delivery = await deliveryRepo.findDeliveryById(id);
-  if (!delivery && !isNaN(id)) {
+  const rawId = String(id || '').trim();
+  const numId = !isNaN(Number(rawId)) ? Number(rawId) : (rawId.replace(/\D/g, '') ? Number(rawId.replace(/\D/g, '')) : NaN);
+
+  let delivery = !isNaN(numId) ? await deliveryRepo.findDeliveryById(numId) : null;
+  if (!delivery && !isNaN(numId)) {
     delivery = await prisma.delivery.findFirst({
-      where: { orderId: Number(id) },
+      where: { orderId: numId },
+      include: {
+        items: { include: { item: true, orderItem: true } },
+        client: true,
+        order: true,
+        assignee: { select: { firstName: true, lastName: true } },
+        warehouse: { select: { name: true } },
+        missions: true,
+        proofs: true
+      }
+    });
+  }
+  if (!delivery && rawId) {
+    delivery = await prisma.delivery.findFirst({
+      where: { deliveryNumber: rawId },
       include: {
         items: { include: { item: true, orderItem: true } },
         client: true,
@@ -378,13 +395,6 @@ export const getDeliveryById = async (id, tenantId, clientId = null) => {
     });
   }
   
-  console.log('[DEBUG GET] ID:', id, 'tenantId:', tenantId, 'clientId:', clientId);
-  if (delivery) {
-    console.log('[DEBUG GET] delivery found! tenantId:', delivery.tenantId, 'clientId:', delivery.clientId);
-  } else {
-    console.log('[DEBUG GET] delivery NOT found in DB');
-  }
-
   if (!delivery || (tenantId !== null && delivery.tenantId !== tenantId) || (clientId !== null && delivery.clientId !== clientId)) {
     throw new AppError('Delivery not found', 404);
   }
@@ -456,7 +466,7 @@ export const updateDelivery = async (id, data, tenantId, performerId, clientId =
   delete parsedData.deliveryNumber;
   delete parsedData.tenantId;
 
-  if (parsedData.assigned_driver !== undefined || parsedData.driverId !== undefined || parsedData.assignedTo !== undefined) {
+  if (parsedData.assigned_driver !== undefined || parsedData.driverId !== undefined || parsedData.assignedTo !== undefined || parsedData.driver !== undefined || parsedData.driverName !== undefined) {
     const targetUserId = Number(parsedData.assigned_driver || parsedData.driverId || parsedData.assignedTo);
     if (parsedData.assignedTo === null || parsedData.assigned_driver === null || parsedData.driverId === null) {
       parsedData.assignedTo = null;
@@ -468,6 +478,20 @@ export const updateDelivery = async (id, data, tenantId, performerId, clientId =
       if (!emp) {
         emp = await prisma.employee.findFirst({ where: { tenantId } });
       }
+      if (emp) {
+        parsedData.assignedTo = emp.id;
+      }
+    } else if (parsedData.driver || parsedData.driverName) {
+      const dName = String(parsedData.driver || parsedData.driverName).trim();
+      const nameParts = dName.split(' ');
+      const emp = await prisma.employee.findFirst({
+        where: {
+          OR: [
+            { firstName: { contains: nameParts[0] } },
+            { user: { name: { contains: dName } } }
+          ]
+        }
+      });
       if (emp) {
         parsedData.assignedTo = emp.id;
       }
@@ -491,10 +515,12 @@ export const updateDelivery = async (id, data, tenantId, performerId, clientId =
     parsedData.deliveryFee = !isNaN(val) ? val : null;
     delete parsedData.delivery_fee;
   }
-  if (parsedData.vehicleRef !== undefined || parsedData.plate_number !== undefined || parsedData.vehicle_id !== undefined) {
-    parsedData.vehicleRef = String(parsedData.vehicleRef || parsedData.plate_number || parsedData.vehicle_id || '');
+  if (parsedData.vehicleRef !== undefined || parsedData.plate_number !== undefined || parsedData.plateNumber !== undefined || parsedData.vehicle_id !== undefined || parsedData.vehicle !== undefined) {
+    parsedData.vehicleRef = String(parsedData.vehicleRef || parsedData.plateNumber || parsedData.plate_number || parsedData.vehicle_id || parsedData.vehicle || '').trim() || null;
     delete parsedData.plate_number;
+    delete parsedData.plateNumber;
     delete parsedData.vehicle_id;
+    delete parsedData.vehicle;
   }
   if (parsedData.mode !== undefined || parsedData.transportMode !== undefined) {
     parsedData.transportMode = String(parsedData.mode || parsedData.transportMode || 'Road');
@@ -537,11 +563,13 @@ export const updateDelivery = async (id, data, tenantId, performerId, clientId =
     }
   }
 
+  const targetDeliveryId = delivery.id;
+
   if (isTransitioningToDispatch) {
     // Run delivery update + stock decrement atomically in one transaction
     await prisma.$transaction(async (tx) => {
       updatedDelivery = await tx.delivery.update({
-        where: { id },
+        where: { id: targetDeliveryId },
         data: parsedData,
         include: { items: true, client: true, order: true }
       });
@@ -565,7 +593,7 @@ export const updateDelivery = async (id, data, tenantId, performerId, clientId =
               movementType: 'OUT',
               quantity: item.quantity,
               referenceType: 'DELIVERY',
-              referenceId: String(delivery.id),
+              referenceId: String(targetDeliveryId),
               remarks: `Dispatched via Delivery status update to ${data.status}`
             }
           });
@@ -574,9 +602,10 @@ export const updateDelivery = async (id, data, tenantId, performerId, clientId =
     });
   } else {
     // No stock changes needed — plain update
-    updatedDelivery = await deliveryRepo.updateDelivery(id, parsedData);
+    updatedDelivery = await deliveryRepo.updateDelivery(targetDeliveryId, parsedData);
   }
 
+  // Cross-portal synchronization: Update linked Order with driver and vehicle
   if (delivery.orderId) {
     let orderTargetStatus = null;
     const normDelStatus = String(data.status || parsedData.status || '').toLowerCase().replace(/\s+/g, '_');
@@ -587,13 +616,80 @@ export const updateDelivery = async (id, data, tenantId, performerId, clientId =
     } else if (['assigned', 'accepted'].includes(normDelStatus) || (parsedData.assignedTo && parsedData.assignedTo > 0)) {
       orderTargetStatus = 'assigned';
     }
-    if (orderTargetStatus) {
-      try {
+
+    try {
+      const existingOrder = await prisma.order.findUnique({ where: { id: delivery.orderId } });
+      if (existingOrder) {
+        let orderMeta = typeof existingOrder.metadata === 'string' ? JSON.parse(existingOrder.metadata) : (existingOrder.metadata || {});
+
+        const finalEmployeeId = parsedData.assignedTo !== undefined ? parsedData.assignedTo : delivery.assignedTo;
+        let driverName = null;
+        let driverUserId = null;
+        let driverPhotoUrl = null;
+        if (finalEmployeeId) {
+          const emp = await prisma.employee.findUnique({
+            where: { id: Number(finalEmployeeId) },
+            include: { user: true }
+          });
+          if (emp) {
+            driverName = `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || emp.user?.name;
+            driverUserId = emp.user?.id || emp.userId;
+            driverPhotoUrl = emp.user?.avatar || null;
+          }
+        }
+
+        const finalVehicleRef = parsedData.vehicleRef !== undefined ? parsedData.vehicleRef : delivery.vehicleRef;
+
+        const updatedOrderMeta = {
+          ...orderMeta,
+          ...(driverName ? { driverName, adminApproved: true } : {}),
+          ...(driverUserId ? { driver_user_id: driverUserId, driverId: driverUserId } : {}),
+          ...(driverPhotoUrl ? { driverPhotoUrl } : {}),
+          ...(finalVehicleRef ? { plateNumber: finalVehicleRef, vehicleId: finalVehicleRef, vehicle: finalVehicleRef } : {})
+        };
+
         await prisma.order.update({
           where: { id: delivery.orderId },
-          data: { status: orderTargetStatus }
+          data: {
+            ...(orderTargetStatus ? { status: orderTargetStatus } : {}),
+            metadata: updatedOrderMeta
+          }
         });
-      } catch (_) {}
+      }
+    } catch (syncErr) {
+      console.error('[Delivery -> Order Sync Error]', syncErr);
+    }
+  }
+
+  // Cross-portal synchronization: Update linked Mission
+  const finalAssignedEmployee = parsedData.assignedTo !== undefined ? parsedData.assignedTo : delivery.assignedTo;
+  if (finalAssignedEmployee) {
+    try {
+      const emp = await prisma.employee.findUnique({
+        where: { id: Number(finalAssignedEmployee) },
+        include: { user: true }
+      });
+      const dName = emp ? `${emp.firstName || ''} ${emp.lastName || ''}`.trim() || emp.user?.name : null;
+      const vRef = parsedData.vehicleRef !== undefined ? parsedData.vehicleRef : delivery.vehicleRef;
+      await prisma.mission.updateMany({
+        where: {
+          OR: [
+            { deliveryId: targetDeliveryId },
+            ...(delivery.orderId ? [{ orderId: delivery.orderId }] : [])
+          ]
+        },
+        data: {
+          assignedEmployeeId: finalAssignedEmployee,
+          status: 'assigned',
+          metadata: {
+            ...(dName ? { driverName: dName } : {}),
+            ...(emp ? { driverId: emp.user?.id || emp.userId } : {}),
+            ...(vRef ? { plateNumber: vRef, vehicleId: vRef } : {})
+          }
+        }
+      });
+    } catch (mErr) {
+      console.error('[Delivery -> Mission Sync Error]', mErr);
     }
   }
 

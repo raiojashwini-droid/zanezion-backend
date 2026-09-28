@@ -146,6 +146,9 @@ export const getOrders = async (req, res, next) => {
       // Always enforce user-scoped filtering for customer accounts
       req.query.user_id = req.user.id;
       req.query.customer_email = req.user.email;
+      if (req.user.name || req.user.companyName) {
+        req.query.customer_name = req.user.name || req.user.companyName;
+      }
       if (resolvedClientId) {
         req.query.clientId = resolvedClientId;
       }
@@ -155,6 +158,9 @@ export const getOrders = async (req, res, next) => {
         const clientRec = (req.user.email ? await prisma.client.findFirst({ where: { email: req.user.email } }) : null)
           || (req.user.name ? await prisma.client.findFirst({ where: { companyName: req.user.name } }) : null);
         if (clientRec) resolvedClientId = clientRec.id;
+      }
+      if (req.user.name || req.user.companyName) {
+        req.query.customer_name = req.user.name || req.user.companyName;
       }
       if (resolvedClientId) {
         req.query.clientId = resolvedClientId;

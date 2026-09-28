@@ -445,14 +445,20 @@ export const assignMission = async (id, assignData, tenantId, performerId) => {
     }
   }
 
-  // Look up vehicle plate from fleet
+  // Look up vehicle plate from vehicle model
   let plateNumber = assignData.vehicleId || null;
   if (assignData.vehicleId) {
     try {
-      const fleet = await prisma.fleet.findFirst({
-        where: { id: Number(assignData.vehicleId) }
+      const numVehicleId = Number(assignData.vehicleId);
+      const vehicle = await prisma.vehicle.findFirst({
+        where: {
+          OR: [
+            ...(!isNaN(numVehicleId) && numVehicleId > 0 ? [{ id: numVehicleId }] : []),
+            { vehicleId: String(assignData.vehicleId) }
+          ]
+        }
       });
-      if (fleet) plateNumber = fleet.plateNumber || fleet.plate_number || fleet.vehicleNumber || String(assignData.vehicleId);
+      if (vehicle) plateNumber = `${vehicle.model} (${vehicle.vehicleId || vehicle.id})`;
     } catch (_) {}
   }
 
@@ -476,10 +482,32 @@ export const assignMission = async (id, assignData, tenantId, performerId) => {
     }
   });
 
-  // Propagate assignment to linked order if it has orderId stored in metadata
+  // Propagate assignment to linked order and delivery
   try {
     const missionMeta = typeof mission.metadata === 'object' ? (mission.metadata || {}) : {};
     const linkedOrderId = missionMeta.orderId || mission.orderId || null;
+    const linkedDeliveryId = mission.deliveryId || null;
+
+    if (linkedDeliveryId) {
+      await prisma.delivery.update({
+        where: { id: linkedDeliveryId },
+        data: {
+          assignedTo: employee ? employee.id : undefined,
+          vehicleRef: plateNumber || (assignData.vehicleId ? String(assignData.vehicleId) : undefined),
+          status: 'assigned'
+        }
+      }).catch(() => null);
+    } else if (linkedOrderId && !isNaN(Number(linkedOrderId))) {
+      await prisma.delivery.updateMany({
+        where: { orderId: Number(linkedOrderId) },
+        data: {
+          assignedTo: employee ? employee.id : undefined,
+          vehicleRef: plateNumber || (assignData.vehicleId ? String(assignData.vehicleId) : undefined),
+          status: 'assigned'
+        }
+      }).catch(() => null);
+    }
+
     if (linkedOrderId && !isNaN(Number(linkedOrderId))) {
       const existingOrder = await prisma.order.findUnique({ where: { id: Number(linkedOrderId) } });
       if (existingOrder) {
@@ -489,12 +517,14 @@ export const assignMission = async (id, assignData, tenantId, performerId) => {
         await prisma.order.update({
           where: { id: Number(linkedOrderId) },
           data: {
+            status: ['pending', 'pending_review', 'created', 'draft'].includes(existingOrder.status) ? 'assigned' : existingOrder.status,
             metadata: {
               ...existingMeta,
               driverName,
               plateNumber,
-              driverId: assignData.driverId || null,
-              vehicleId: assignData.vehicleId || null,
+              driverId: employee?.user?.id || employee?.userId || assignData.driverId || null,
+              driver_user_id: employee?.user?.id || employee?.userId || assignData.driverId || null,
+              vehicleId: assignData.vehicleId || plateNumber || null,
               adminApproved: true
             }
           }

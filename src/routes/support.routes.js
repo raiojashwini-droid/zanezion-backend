@@ -1,13 +1,18 @@
 import express from 'express';
 import * as supportController from '../controllers/support.controller.js';
 import { authenticate, checkPermission } from '../middlewares/auth.middleware.js';
+import { upload } from '../middlewares/upload.middleware.js';
 
 const router = express.Router();
 
 router.use(authenticate);
 
+// Attachments
+router.post('/upload', upload.single('file'), supportController.uploadAttachment);
+
 // Tickets
 router.get('/tickets', checkPermission('SUPPORT', 'READ'), supportController.getTickets);
+router.get('/tickets/:id', checkPermission('SUPPORT', 'READ'), supportController.getTicketById);
 router.post('/tickets', checkPermission('SUPPORT', 'CREATE'), supportController.createTicket);
 router.put('/tickets/:id', checkPermission('SUPPORT', 'UPDATE'), supportController.updateTicket);
 router.delete('/tickets/:id', checkPermission('SUPPORT', 'DELETE'), supportController.deleteTicket);

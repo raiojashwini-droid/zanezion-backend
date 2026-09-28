@@ -418,6 +418,16 @@ export const updateOrderStatus = async (id, status, tenantId, performerId, remar
         where: { orderId: id },
         data: { status: 'delivered' }
       }).catch(() => null);
+    } else if (['in_transit', 'en_route', 'dispatched'].includes(String(status).toLowerCase())) {
+      await tx.delivery.updateMany({
+        where: { orderId: id },
+        data: { status: 'in_transit' }
+      }).catch(() => null);
+    } else if (['assigned', 'accepted'].includes(String(status).toLowerCase())) {
+      await tx.delivery.updateMany({
+        where: { orderId: id },
+        data: { status: 'assigned' }
+      }).catch(() => null);
     } else if (['cancelled', 'rejected', 'canceled'].includes(String(status).toLowerCase())) {
       await tx.delivery.updateMany({
         where: { orderId: id },
@@ -462,10 +472,17 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
     }
   }
 
-  // clientId is handled via Prisma relation (client connect), not as a raw field
+  // Relational and immutable fields that Prisma OrderUpdateInput rejects
+  const ignoredKeys = [
+    'id', 'db_id', 'tenantId', 'createdById', 'createdAt', 'updatedAt',
+    'client', 'creator', 'tenant', 'deliveries', 'missions', 'invoices',
+    'items', 'customItems', 'custom_items', 'manifestItems'
+  ];
+  ignoredKeys.forEach(k => delete orderData[k]);
+
+  // Only valid scalar update fields for Prisma Order model
   const validDbKeys = [
-    'id', 'tenantId', 'orderNumber', 'createdById',
-    'status', 'priority', 'orderType', 'totalAmount'
+    'orderNumber', 'status', 'priority', 'orderType', 'totalAmount'
   ];
 
   const dbData = {};
@@ -480,23 +497,85 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
     }
   });
 
-  // Safely update client relation only when a valid numeric clientId is provided
-  const rawClientId = orderData.clientId;
-  const parsedClientId = rawClientId && rawClientId !== 'CLT-GUEST' ? Number(rawClientId) : NaN;
+  let metadataObj = typeof order.metadata === 'string' ? JSON.parse(order.metadata) : (order.metadata || {});
+
+  // Identify original customer & client details so admin updates never detach the order from its customer
+  const originalClientId = (metadataObj.client && metadataObj.client.id && metadataObj.client.id !== 153 && metadataObj.client.id !== 1)
+    ? metadataObj.client.id
+    : (order.clientId && order.clientId !== 153 && order.clientId !== 1 ? order.clientId : (metadataObj.clientId || null));
+
+  const rawClientId = orderData.clientId || data.clientId;
+  let parsedClientId = rawClientId && rawClientId !== 'CLT-GUEST' ? Number(rawClientId) : NaN;
+
+  // If the parsedClientId is 153 or 1 (admin internal company) or missing, and this order has an original client, preserve originalClientId
+  if (originalClientId && (!parsedClientId || isNaN(parsedClientId) || parsedClientId === 153 || parsedClientId === 1 || parsedClientId === tenantId)) {
+    parsedClientId = Number(originalClientId);
+  }
+
   if (!isNaN(parsedClientId) && parsedClientId > 0) {
     dbData.client = { connect: { id: parsedClientId } };
   }
-  // else: keep existing client — do not touch the relation
+
+  // Preserve customer and client identity fields in metadata
+  const originalCustomerId = metadataObj.userId || metadataObj.user_id || metadataObj.customer_id || metadataObj.created_by || (metadataObj.customItems?.[0]?.userId) || (metadataObj.custom_items?.[0]?.user_id) || order.createdById;
+  const originalCustomerEmail = metadataObj.customer_email || metadataObj.email || metadataObj.clientEmail || (metadataObj.client && metadataObj.client.email) || (metadataObj.customItems?.[0]?.email) || (metadataObj.custom_items?.[0]?.email) || null;
+  const originalClientName = metadataObj.clientName || metadataObj.client_name || (metadataObj.client && metadataObj.client.companyName) || null;
+  const originalClientObj = metadataObj.client || (order.client ? {
+    id: order.client.id,
+    companyName: order.client.companyName,
+    clientCode: order.client.clientCode,
+    contactPerson: order.client.contactPerson,
+    email: order.client.email,
+    plan: order.client.plan,
+    clientType: order.client.clientType,
+    status: order.client.status
+  } : null);
+
+  if (originalCustomerId) {
+    metadataExt.userId = originalCustomerId;
+    metadataExt.user_id = originalCustomerId;
+    metadataExt.customer_id = originalCustomerId;
+    metadataExt.created_by = originalCustomerId;
+  }
+  if (originalCustomerEmail) {
+    metadataExt.email = originalCustomerEmail;
+    metadataExt.customer_email = originalCustomerEmail;
+    metadataExt.clientEmail = originalCustomerEmail;
+  }
+  if (parsedClientId) {
+    metadataExt.clientId = parsedClientId;
+    metadataExt.client_id = parsedClientId;
+  }
+  if (originalClientName) {
+    metadataExt.clientName = originalClientName;
+    metadataExt.client_name = originalClientName;
+  }
+  if (originalClientObj) {
+    metadataExt.client = originalClientObj;
+  }
 
   if (data.totalAmount !== undefined || data.total_amount !== undefined) {
     dbData.totalAmount = Number(data.totalAmount || data.total_amount || 0);
   }
 
-  let metadataObj = typeof order.metadata === 'string' ? JSON.parse(order.metadata) : (order.metadata || {});
-
   if (customItems.length > 0) {
     metadataExt.customItems = customItems;
     const c0 = customItems[0];
+    if (originalCustomerId) {
+      c0.userId = originalCustomerId;
+      c0.user_id = originalCustomerId;
+      c0.customer_id = originalCustomerId;
+    }
+    if (originalCustomerEmail) {
+      c0.email = originalCustomerEmail;
+      c0.customer_email = originalCustomerEmail;
+    }
+    if (parsedClientId) {
+      c0.clientId = parsedClientId;
+    }
+    if (originalClientName) {
+      c0.clientName = originalClientName;
+    }
     if (c0.passengerName) metadataExt.passengerName = c0.passengerName;
     if (c0.guestName) metadataExt.guestName = c0.guestName;
     if (c0.numberOfPassengers) {
@@ -523,12 +602,94 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
     if (c0.amenities) metadataExt.amenities = c0.amenities;
   }
 
+  // --- Resolve Driver and Vehicle Assignment ---
+  const incomingMeta = typeof data.metadata === 'object' && data.metadata ? data.metadata : {};
+  let driverUserId = data.driver_user_id || data.driverId || metadataExt.driver_user_id || metadataExt.driverId || incomingMeta.driver_user_id || incomingMeta.driverId || metadataObj.driver_user_id || metadataObj.driverId;
+  let driverName = data.driverName || metadataExt.driverName || incomingMeta.driverName || metadataObj.driverName;
+  let plateNumber = data.plateNumber || data.vehicleId || data.vehicle || metadataExt.plateNumber || metadataExt.vehicleId || metadataExt.vehicle || incomingMeta.plateNumber || incomingMeta.vehicleId || incomingMeta.vehicle || metadataObj.plateNumber || metadataObj.vehicleId;
+
+  let employee = null;
+  if (driverUserId && !isNaN(Number(driverUserId))) {
+    employee = await prisma.employee.findFirst({
+      where: {
+        OR: [
+          { userId: Number(driverUserId) },
+          { id: Number(driverUserId) }
+        ]
+      },
+      include: { user: true }
+    });
+  } else if (driverName && typeof driverName === 'string') {
+    const nameParts = driverName.trim().split(' ');
+    employee = await prisma.employee.findFirst({
+      where: {
+        OR: [
+          { firstName: { contains: nameParts[0] } },
+          { user: { name: { contains: driverName.trim() } } }
+        ]
+      },
+      include: { user: true }
+    });
+  }
+
+  if (employee) {
+    driverName = `${employee.firstName || ''} ${employee.lastName || ''}`.trim() || employee.user?.name || driverName;
+    driverUserId = employee.user?.id || employee.userId;
+    metadataExt.driverName = driverName;
+    metadataExt.driver_user_id = driverUserId;
+    metadataExt.driverId = driverUserId;
+    if (employee.user?.avatar) {
+      metadataExt.driverPhotoUrl = employee.user.avatar;
+    }
+  } else if (driverName) {
+    metadataExt.driverName = driverName;
+    if (driverUserId) {
+      metadataExt.driver_user_id = Number(driverUserId);
+      metadataExt.driverId = Number(driverUserId);
+    }
+  }
+
+  if (plateNumber) {
+    metadataExt.plateNumber = String(plateNumber).trim();
+    metadataExt.vehicleId = String(plateNumber).trim();
+    metadataExt.vehicle = String(plateNumber).trim();
+  }
+
+  if (customItems.length > 0 || (metadataExt.customItems && metadataExt.customItems.length > 0)) {
+    const targetCustomItems = metadataExt.customItems || customItems;
+    if (targetCustomItems[0]) {
+      if (plateNumber) {
+        targetCustomItems[0].plateNumber = String(plateNumber).trim();
+        targetCustomItems[0].vehicleId = String(plateNumber).trim();
+        targetCustomItems[0].vehicle = String(plateNumber).trim();
+      }
+      if (driverName) {
+        targetCustomItems[0].driverName = driverName;
+      }
+      if (driverUserId) {
+        targetCustomItems[0].driver_user_id = driverUserId;
+        targetCustomItems[0].driverId = driverUserId;
+      }
+    }
+  }
+
+  if (driverName || driverUserId) {
+    metadataExt.adminApproved = true;
+  }
+
+  let newStatus = data.status ? String(data.status).toLowerCase() : order.status;
+  // If driver or vehicle is newly assigned and status is pending, advance status to assigned
+  if ((driverName || driverUserId || plateNumber) && ['pending', 'pending_review', 'created', 'draft'].includes(newStatus)) {
+    newStatus = 'assigned';
+  }
+  metadataExt.chauffeur_status = newStatus;
+  metadataExt.status = newStatus;
+
   const finalMetadata = {
     ...metadataObj,
     ...metadataExt
   };
 
-  const newStatus = data.status ? String(data.status).toLowerCase() : order.status;
   const updatedOrder = await prisma.order.update({
     where: { id },
     data: {
@@ -537,6 +698,93 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
       metadata: finalMetadata
     }
   });
+
+  // Cross-table synchronization: Sync Driver & Vehicle to Delivery
+  const isChauffeurOrDelivery = ['CHAUFFEUR', 'PRODUCT', 'DELIVERY', 'CONCIERGE'].includes(String(updatedOrder.orderType || '').toUpperCase());
+  if (isChauffeurOrDelivery && (driverName || driverUserId || plateNumber || employee)) {
+    try {
+      const existingDelivery = await prisma.delivery.findFirst({
+        where: { orderId: id }
+      });
+
+      const delStatus = ['completed', 'delivered'].includes(newStatus)
+        ? 'delivered'
+        : (['in_transit', 'en_route'].includes(newStatus) ? 'in_transit' : 'assigned');
+
+      if (existingDelivery) {
+        await prisma.delivery.update({
+          where: { id: existingDelivery.id },
+          data: {
+            ...(employee ? { assignedTo: employee.id } : {}),
+            ...(plateNumber ? { vehicleRef: String(plateNumber).trim() } : {}),
+            status: delStatus
+          }
+        });
+      } else {
+        const deliveryCount = await prisma.delivery.count({ where: { tenantId: updatedOrder.tenantId } });
+        const deliveryNumber = `DEL-${new Date().getFullYear()}-${String(deliveryCount + 1).padStart(4, '0')}`;
+
+        let warehouse = await prisma.warehouse.findFirst({ where: { tenantId: updatedOrder.tenantId } });
+        if (!warehouse) warehouse = await prisma.warehouse.findFirst();
+
+        await prisma.delivery.create({
+          data: {
+            tenantId: updatedOrder.tenantId,
+            deliveryNumber,
+            orderId: id,
+            clientId: updatedOrder.clientId,
+            assignedTo: employee ? employee.id : null,
+            warehouseId: warehouse ? warehouse.id : 1,
+            status: delStatus,
+            missionType: updatedOrder.orderType === 'CHAUFFEUR' ? 'Chauffeur' : 'Delivery',
+            transportMode: 'Road',
+            vehicleRef: plateNumber ? String(plateNumber).trim() : null,
+            pickupLocation: finalMetadata.pickupLocation || finalMetadata.pickup_location || null,
+            dropLocation: finalMetadata.dropLocation || finalMetadata.drop_location || finalMetadata.location || null,
+            remarks: JSON.stringify({
+              driver: driverName,
+              assigned_driver: employee ? employee.id : driverUserId,
+              driverId: driverUserId,
+              vehicle: plateNumber,
+              passengerInfo: {
+                name: finalMetadata.passengerName || finalMetadata.guestName || finalMetadata.clientName || '',
+                count: finalMetadata.numberOfPassengers || finalMetadata.passengers || 1
+              }
+            })
+          }
+        });
+      }
+    } catch (delErr) {
+      console.error('[Order -> Delivery Sync Error]', delErr);
+    }
+
+    // Cross-table synchronization: Sync to Mission
+    if (employee) {
+      try {
+        const existingMission = await prisma.mission.findFirst({
+          where: { orderId: id }
+        });
+        if (existingMission) {
+          await prisma.mission.update({
+            where: { id: existingMission.id },
+            data: {
+              assignedEmployeeId: employee.id,
+              status: ['completed', 'delivered'].includes(newStatus) ? 'completed' : 'assigned',
+              metadata: {
+                ...(typeof existingMission.metadata === 'object' ? existingMission.metadata : {}),
+                driverName,
+                driverId: driverUserId,
+                plateNumber,
+                vehicleId: plateNumber
+              }
+            }
+          });
+        }
+      } catch (misErr) {
+        console.error('[Order -> Mission Sync Error]', misErr);
+      }
+    }
+  }
 
   if (['cancelled', 'rejected', 'canceled'].includes(newStatus)) {
     await prisma.delivery.updateMany({
@@ -553,6 +801,13 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
   return {
     ...rest,
     metadata: finalMetadata,
+    driverName: finalMetadata.driverName || null,
+    driver_user_id: finalMetadata.driver_user_id || finalMetadata.driverId || null,
+    driverId: finalMetadata.driverId || finalMetadata.driver_user_id || null,
+    plateNumber: finalMetadata.plateNumber || null,
+    vehicleId: finalMetadata.vehicleId || finalMetadata.plateNumber || null,
+    vehicle: finalMetadata.vehicle || finalMetadata.plateNumber || null,
+    vehicleRef: finalMetadata.plateNumber || null,
     ...finalMetadata
   };
 };

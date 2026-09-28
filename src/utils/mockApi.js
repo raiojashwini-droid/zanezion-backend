@@ -881,7 +881,7 @@ const handleRequest = async (method, url, data) => {
 
     if (id) {
       const db = getDB(key);
-      const index = db.findIndex(item => String(item.id) === String(id));
+      const index = db.findIndex(item => (item.id && String(item.id) === String(id)) || (item.ticketId && String(item.ticketId) === String(id)));
 
       if (method === 'GET') {
         if (index !== -1) {

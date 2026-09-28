@@ -1,14 +1,56 @@
 import * as supportRepository from '../repositories/support.repository.js';
 import AppError from '../utils/AppError.js';
 import { logAudit } from '../utils/audit.js';
+import cloudinary from '../config/cloudinary.js';
 
 const generateId = (prefix) => `${prefix}-${Math.floor(1000 + Math.random() * 8999)}`;
 
+const sanitizeAndUploadMessages = async (messages) => {
+  if (!Array.isArray(messages)) return messages;
+  const baseFolder = process.env.CLOUDINARY_FOLDER || 'zanezion';
+  
+  const processed = [];
+  for (const msg of messages) {
+    if (!msg || typeof msg !== 'object') {
+      processed.push(msg);
+      continue;
+    }
+    const newMsg = { ...msg };
+    if (newMsg.attachments && typeof newMsg.attachments === 'object') {
+      const newAttachments = { ...newMsg.attachments };
+      for (const [key, val] of Object.entries(newAttachments)) {
+        if (typeof val === 'string' && val.startsWith('data:')) {
+          try {
+            const uploadRes = await cloudinary.uploader.upload(val, {
+              folder: `${baseFolder}/support/messages`,
+              resource_type: 'auto'
+            });
+            if (uploadRes?.secure_url) {
+              newAttachments[key] = uploadRes.secure_url;
+            }
+          } catch (uploadErr) {
+            console.warn(`[CLOUDINARY_AUTO_UPLOAD_WARN] Could not upload attachment ${key}:`, uploadErr?.message);
+          }
+        }
+      }
+      newMsg.attachments = newAttachments;
+    }
+    processed.push(newMsg);
+  }
+  return processed;
+};
+
 // Tickets
 export const createTicket = async (data, performerId, tenantId) => {
-  let ticketId = data.id || generateId('TKT');
-  const existing = await supportRepository.findTicketById(ticketId, tenantId);
-  if (existing) throw new AppError('Ticket ID already exists', 400);
+  let ticketId = data.ticketId || data.id;
+  if (!ticketId || String(ticketId).trim() === '') {
+    ticketId = generateId('TKT');
+  }
+  let existing = await supportRepository.findTicketById(ticketId, tenantId);
+  while (existing) {
+    ticketId = `TKT-${Math.floor(1000 + Math.random() * 8999)}`;
+    existing = await supportRepository.findTicketById(ticketId, tenantId);
+  }
 
   const payload = {
     ticketId,
@@ -27,7 +69,7 @@ export const createTicket = async (data, performerId, tenantId) => {
     createdById: data.created_by ? Number(data.created_by) : (data.createdById ? Number(data.createdById) : null),
     createdByEmail: data.createdByEmail || null,
     createdByName: data.createdByName || null,
-    messages: data.messages ? JSON.parse(JSON.stringify(data.messages)) : [],
+    messages: await sanitizeAndUploadMessages(data.messages ? JSON.parse(JSON.stringify(data.messages)) : []),
     tenantId
   };
 
@@ -56,6 +98,42 @@ export const getTickets = async (tenantId, user) => {
   return tickets.map(t => ({ ...t, id: t.ticketId, ticketId: t.ticketId, db_id: t.id }));
 };
 
+export const getTicketById = async (id, tenantId, user) => {
+  const roleName = typeof user?.role === 'object' ? (user?.role?.name || '') : String(user?.role || '');
+  const normalizedRole = roleName.toLowerCase().replace(/\s+/g, '_');
+  const userTenant = user?.tenantId ? Number(user.tenantId) : 1;
+  const isHQStaff = ['super_admin', 'superadmin', 'admin', 'concierge', 'operations', 'logistics', 'procurement', 'inventory', 'staff'].includes(normalizedRole) && userTenant === 1;
+  const effectiveTenantId = isHQStaff ? null : tenantId;
+
+  const ticket = await supportRepository.findTicketById(id, effectiveTenantId);
+  if (!ticket) throw new AppError('Ticket not found', 404);
+
+  if (['customer', 'individual_client', 'personal'].some(r => normalizedRole.includes(r))) {
+    const myUserId = user?.id;
+    const myEmail = String(user?.email || '').toLowerCase().trim();
+    const myClientId = user?.clientId;
+    const isOwner = (myUserId && ticket.createdById === myUserId) ||
+                    (myEmail && ticket.createdByEmail?.toLowerCase().trim() === myEmail) ||
+                    (myClientId && ticket.clientId === myClientId);
+    if (!isOwner) {
+      throw new AppError('Access denied to this ticket', 403);
+    }
+  }
+
+  let parsedMessages = ticket.messages;
+  if (typeof parsedMessages === 'string') {
+    try { parsedMessages = JSON.parse(parsedMessages); } catch (_) { parsedMessages = []; }
+  }
+
+  return {
+    ...ticket,
+    id: ticket.ticketId,
+    ticketId: ticket.ticketId,
+    db_id: ticket.id,
+    messages: parsedMessages
+  };
+};
+
 export const updateTicket = async (id, data, tenantId, performerId) => {
   // Allow admin updates across all tenants (tenantId null)
   const existing = await supportRepository.findTicketById(id, null);
@@ -73,7 +151,7 @@ export const updateTicket = async (id, data, tenantId, performerId) => {
     priority: data.priority !== undefined ? data.priority : existing.priority,
     status: data.status !== undefined ? data.status : existing.status,
     category: data.category !== undefined ? data.category : existing.category,
-    messages: parsedMessages
+    messages: await sanitizeAndUploadMessages(parsedMessages)
   };
 
   const updated = await supportRepository.updateTicket(id, null, payload);
@@ -82,9 +160,12 @@ export const updateTicket = async (id, data, tenantId, performerId) => {
 };
 
 export const deleteTicket = async (id, tenantId, performerId) => {
-  const existing = await supportRepository.findTicketById(id, tenantId);
+  let existing = await supportRepository.findTicketById(id, tenantId);
+  if (!existing) {
+    existing = await supportRepository.findTicketById(id, null);
+  }
   if (!existing) throw new AppError('Ticket not found', 404);
-  await supportRepository.deleteTicket(id, tenantId);
+  await supportRepository.deleteTicket(id, null);
   await logAudit({ module: 'SUPPORT', action: 'DELETE', description: `Deleted ticket ${id}`, oldValue: existing, performedBy: performerId });
   return true;
 };

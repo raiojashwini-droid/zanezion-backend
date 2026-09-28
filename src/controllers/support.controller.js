@@ -1,6 +1,7 @@
 import * as supportService from '../services/support.service.js';
 import { sendResponse } from '../utils/response.js';
 import { emitToTenant } from '../utils/socket.js';
+import cloudinary from '../config/cloudinary.js';
 
 import { resolveTenantId } from '../utils/tenantResolver.js';
 const handleRequest = async (req, res, next, serviceFn, successMsg, eventName) => {
@@ -34,9 +35,46 @@ const handleRequest = async (req, res, next, serviceFn, successMsg, eventName) =
   }
 };
 
+// Attachments
+export const uploadAttachment = async (req, res, next) => {
+  try {
+    if (!req.file) {
+      return sendResponse(res, 400, 'No attachment file provided');
+    }
+    const baseFolder = process.env.CLOUDINARY_FOLDER || 'zanezion';
+    const uploadStream = () => {
+      return new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          { folder: `${baseFolder}/support`, resource_type: 'auto' },
+          (error, result) => {
+            if (error) return reject(error);
+            resolve(result);
+          }
+        );
+        stream.end(req.file.buffer);
+      });
+    };
+    const result = await uploadStream();
+    sendResponse(res, 200, 'Attachment uploaded to Cloudinary', { url: result.secure_url });
+  } catch (error) {
+    next(error);
+  }
+};
+
 // Tickets
 export const createTicket = (req, res, next) => handleRequest(req, res, next, supportService.createTicket, 'Ticket created', 'support_update');
 export const getTickets = (req, res, next) => handleRequest(req, res, next, supportService.getTickets, 'Tickets fetched');
+export const getTicketById = async (req, res, next) => {
+  try {
+    const roleName = String(typeof req.user?.role === 'string' ? req.user.role : (req.user?.role?.name || '')).toUpperCase();
+    const isSuperAdminOrAdmin = ['SUPER_ADMIN', 'SUPERADMIN', 'ADMIN'].includes(roleName) && (Number(req.user.tenantId) === 1 || !req.user.tenantId);
+    const tenantId = isSuperAdminOrAdmin ? null : resolveTenantId(req);
+    const result = await supportService.getTicketById(req.params.id, tenantId, req.user);
+    sendResponse(res, 200, 'Ticket details fetched', result);
+  } catch (error) {
+    next(error);
+  }
+};
 export const updateTicket = (req, res, next) => handleRequest(req, res, next, supportService.updateTicket, 'Ticket updated', 'support_update');
 export const updateTicketStatus = (req, res, next) => handleRequest(req, res, next, supportService.updateTicket, 'Ticket updated', 'support_update');
 export const deleteTicket = (req, res, next) => handleRequest(req, res, next, supportService.deleteTicket, 'Ticket deleted', 'support_update');

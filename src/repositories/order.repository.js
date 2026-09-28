@@ -95,24 +95,59 @@ export const findOrderById = async (id) => {
     include: {
       items: { include: { item: true } },
       client: true,
-      creator: { select: { firstName: true, lastName: true } }
+      creator: { select: { firstName: true, lastName: true } },
+      deliveries: {
+        include: {
+          assignee: { select: { firstName: true, lastName: true, userId: true } }
+        }
+      }
     }
   });
   if (!order) return null;
   const { metadata, ...rest } = order;
   const metadataObj = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
-  return {
+
+  const linkedDel = order.deliveries && order.deliveries.find(d => d.assignedTo || d.vehicleRef);
+  const c0 = (Array.isArray(metadataObj.customItems) && metadataObj.customItems[0]) || (Array.isArray(metadataObj.custom_items) && metadataObj.custom_items[0]) || {};
+
+  let resolvedDriverName = metadataObj.driverName || c0.driverName;
+  let resolvedDriverUserId = metadataObj.driver_user_id || metadataObj.driverId || c0.driver_user_id || c0.driverId;
+  let resolvedPlateNumber = metadataObj.plateNumber || metadataObj.vehicleId || metadataObj.vehicle || c0.plateNumber || c0.vehicleId || c0.vehicle;
+
+  if (!resolvedDriverName && linkedDel?.assignee) {
+    resolvedDriverName = `${linkedDel.assignee.firstName || ''} ${linkedDel.assignee.lastName || ''}`.trim();
+    resolvedDriverUserId = linkedDel.assignee.userId;
+  }
+  if (!resolvedPlateNumber && linkedDel?.vehicleRef) {
+    resolvedPlateNumber = linkedDel.vehicleRef;
+  }
+
+  const enrichedMeta = {
     ...metadataObj,
+    ...(resolvedDriverName ? { driverName: resolvedDriverName } : {}),
+    ...(resolvedDriverUserId ? { driver_user_id: resolvedDriverUserId, driverId: resolvedDriverUserId } : {}),
+    ...(resolvedPlateNumber ? { plateNumber: resolvedPlateNumber, vehicleId: resolvedPlateNumber, vehicle: resolvedPlateNumber } : {})
+  };
+
+  return {
+    ...enrichedMeta,
     ...rest,
-    metadata: metadataObj
+    driverName: resolvedDriverName || null,
+    driver_user_id: resolvedDriverUserId || null,
+    driverId: resolvedDriverUserId || null,
+    plateNumber: resolvedPlateNumber || null,
+    vehicleId: resolvedPlateNumber || null,
+    vehicle: resolvedPlateNumber || null,
+    vehicleRef: resolvedPlateNumber || null,
+    metadata: enrichedMeta
   };
 };
 
 export const findAllOrders = async (tenantId, query) => {
-  const { page = 1, limit = 10, search = '', status, clientId, user_id, customer_email, orderType, currentDept, passedThrough } = query;
+  const { page = 1, limit = 10, search = '', status, clientId, user_id, customer_email, customer_name, orderType, currentDept, passedThrough } = query;
   const skip = (page - 1) * limit;
 
-  const isCustomerFilter = !!(user_id || customer_email);
+  const isCustomerFilter = !!(user_id || customer_email || customer_name);
   const where = {
     ...(!isCustomerFilter && tenantId !== null && tenantId !== undefined && { tenantId }),
     ...(search && { orderNumber: { contains: search } }),
@@ -139,7 +174,12 @@ export const findAllOrders = async (tenantId, query) => {
     orderBy: { createdAt: 'desc' },
     include: {
       items: { include: { item: true } },
-      client: { select: { id: true, companyName: true, clientCode: true, contactPerson: true, email: true, plan: true, clientType: true, status: true } }
+      client: { select: { id: true, companyName: true, clientCode: true, contactPerson: true, email: true, plan: true, clientType: true, status: true } },
+      deliveries: {
+        include: {
+          assignee: { select: { firstName: true, lastName: true, userId: true } }
+        }
+      }
     }
   });
 
@@ -160,11 +200,48 @@ export const findAllOrders = async (tenantId, query) => {
         })
       : metaList;
 
-    return {
+    const linkedDel = o.deliveries && o.deliveries.find(d => d.assignedTo || d.vehicleRef);
+    const c0 = (Array.isArray(metadataObj.customItems) && metadataObj.customItems[0]) || (Array.isArray(metadataObj.custom_items) && metadataObj.custom_items[0]) || {};
+
+    let resolvedDriverName = metadataObj.driverName || c0.driverName;
+    let resolvedDriverUserId = metadataObj.driver_user_id || metadataObj.driverId || c0.driver_user_id || c0.driverId;
+    let resolvedPlateNumber = metadataObj.plateNumber || metadataObj.vehicleId || metadataObj.vehicle || c0.plateNumber || c0.vehicleId || c0.vehicle;
+
+    if (!resolvedDriverName && linkedDel?.assignee) {
+      resolvedDriverName = `${linkedDel.assignee.firstName || ''} ${linkedDel.assignee.lastName || ''}`.trim();
+      resolvedDriverUserId = linkedDel.assignee.userId;
+    }
+    if (!resolvedPlateNumber && linkedDel?.vehicleRef) {
+      resolvedPlateNumber = linkedDel.vehicleRef;
+    }
+
+    const enrichedMeta = {
       ...metadataObj,
+      ...(resolvedDriverName ? { driverName: resolvedDriverName } : {}),
+      ...(resolvedDriverUserId ? { driver_user_id: resolvedDriverUserId, driverId: resolvedDriverUserId } : {}),
+      ...(resolvedPlateNumber ? { plateNumber: resolvedPlateNumber, vehicleId: resolvedPlateNumber, vehicle: resolvedPlateNumber } : {})
+    };
+
+    // Restore effective client if order.client is missing or pointing to internal HQ (153 or 1) while metadata has the real client
+    const effectiveClient = (o.client && o.client.id !== 153 && o.client.id !== 1)
+      ? o.client
+      : (metadataObj.client || o.client);
+    const effectiveClientId = effectiveClient ? effectiveClient.id : (o.clientId || metadataObj.clientId || metadataObj.client?.id);
+
+    return {
+      ...enrichedMeta,
       ...rest,
+      client: effectiveClient,
+      clientId: effectiveClientId,
       items: itemsArr,
-      metadata: metadataObj
+      driverName: resolvedDriverName || null,
+      driver_user_id: resolvedDriverUserId || null,
+      driverId: resolvedDriverUserId || null,
+      plateNumber: resolvedPlateNumber || null,
+      vehicleId: resolvedPlateNumber || null,
+      vehicle: resolvedPlateNumber || null,
+      vehicleRef: resolvedPlateNumber || null,
+      metadata: enrichedMeta
     };
   });
 
@@ -197,20 +274,71 @@ export const findAllOrders = async (tenantId, query) => {
     });
   }
 
-  // For customer queries, ensure orders matching customer's user_id, email, or clientId are included
+  // For customer queries, ensure orders matching customer's user_id, email, clientId, or name are included
   if (isCustomerFilter) {
-    const filterClientId = clientId ? String(clientId) : null;
-    const filterUserId = user_id ? String(user_id) : null;
+    const filterClientId = clientId ? String(clientId).trim() : null;
+    const filterUserId = user_id ? String(user_id).trim() : null;
     const filterEmail = customer_email ? String(customer_email).toLowerCase().trim() : null;
+    const filterName = customer_name ? String(customer_name).toLowerCase().trim() : null;
 
     mappedOrders = mappedOrders.filter(o => {
-      const oClientId = String(o.clientId || o.client_id || '');
-      const oUserId = String(o.userId || o.user_id || o.customer_id || o.metadata?.userId || o.metadata?.user_id || o.metadata?.customer_id || o.created_by || o.createdById || o.metadata?.created_by || '');
-      const oEmail = String(o.email || o.client_email || o.customer_email || o.metadata?.email || o.metadata?.user_email || o.metadata?.customer_email || '').toLowerCase().trim();
+      const c0 = o.metadata?.customItems?.[0] || o.metadata?.custom_items?.[0] || {};
 
-      if (filterUserId && oUserId && oUserId === filterUserId) return true;
-      if (filterClientId && oClientId && oClientId === filterClientId) return true;
-      if (filterEmail && oEmail && oEmail === filterEmail) return true;
+      const userIds = [
+        String(o.createdById || ''),
+        String(o.userId || ''),
+        String(o.user_id || ''),
+        String(o.customer_id || ''),
+        String(o.metadata?.userId || ''),
+        String(o.metadata?.user_id || ''),
+        String(o.metadata?.customer_id || ''),
+        String(o.metadata?.created_by || ''),
+        String(c0.userId || ''),
+        String(c0.user_id || ''),
+        String(c0.customer_id || ''),
+      ].filter(Boolean);
+
+      const clientIds = [
+        String(o.clientId || ''),
+        String(o.client_id || ''),
+        String(o.client?.id || ''),
+        String(o.metadata?.clientId || ''),
+        String(o.metadata?.client_id || ''),
+        String(o.metadata?.client?.id || ''),
+        String(c0.clientId || ''),
+      ].filter(Boolean);
+
+      const emails = [
+        String(o.client?.email || ''),
+        String(o.email || ''),
+        String(o.client_email || ''),
+        String(o.customer_email || ''),
+        String(o.metadata?.email || ''),
+        String(o.metadata?.user_email || ''),
+        String(o.metadata?.customer_email || ''),
+        String(o.metadata?.client_email || ''),
+        String(o.metadata?.client?.email || ''),
+        String(c0.email || ''),
+        String(c0.customer_email || ''),
+      ].filter(Boolean).map(e => e.toLowerCase().trim());
+
+      const names = [
+        String(o.client?.companyName || ''),
+        String(o.client?.name || ''),
+        String(o.metadata?.clientName || ''),
+        String(o.metadata?.client_name || ''),
+        String(o.metadata?.guestName || ''),
+        String(o.metadata?.passengerName || ''),
+        String(o.metadata?.customer_name || ''),
+        String(c0.clientName || ''),
+        String(c0.passengerName || ''),
+        String(c0.guestName || ''),
+      ].filter(Boolean).map(n => n.toLowerCase().trim());
+
+      if (filterUserId && userIds.includes(filterUserId)) return true;
+      if (filterClientId && clientIds.includes(filterClientId)) return true;
+      if (filterEmail && emails.some(e => e === filterEmail || e.includes(filterEmail) || filterEmail.includes(e))) return true;
+      if (filterName && names.some(n => n === filterName || n.includes(filterName) || filterName.includes(n))) return true;
 
       return false;
     });

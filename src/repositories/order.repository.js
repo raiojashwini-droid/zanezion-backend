@@ -90,19 +90,40 @@ export const createOrder = async (data, items, tenantId, tx = null) => {
 };
 
 export const findOrderById = async (id) => {
-  const order = await prisma.order.findUnique({
-    where: { id },
-    include: {
-      items: { include: { item: true } },
-      client: true,
-      creator: { select: { firstName: true, lastName: true } },
-      deliveries: {
-        include: {
-          assignee: { select: { firstName: true, lastName: true, userId: true } }
+  let numId = Number(id);
+  let order = null;
+  if (!isNaN(numId) && numId > 0) {
+    order = await prisma.order.findUnique({
+      where: { id: numId },
+      include: {
+        items: { include: { item: true } },
+        client: true,
+        creator: { select: { firstName: true, lastName: true } },
+        deliveries: {
+          include: {
+            assignee: { select: { firstName: true, lastName: true, userId: true } }
+          }
         }
       }
-    }
-  });
+    });
+  }
+
+  if (!order && typeof id === 'string' && id.trim()) {
+    order = await prisma.order.findFirst({
+      where: { orderNumber: id.trim() },
+      include: {
+        items: { include: { item: true } },
+        client: true,
+        creator: { select: { firstName: true, lastName: true } },
+        deliveries: {
+          include: {
+            assignee: { select: { firstName: true, lastName: true, userId: true } }
+          }
+        }
+      }
+    });
+  }
+
   if (!order) return null;
   const { metadata, ...rest } = order;
   const metadataObj = typeof metadata === 'string' ? JSON.parse(metadata) : (metadata || {});
@@ -129,9 +150,36 @@ export const findOrderById = async (id) => {
     ...(resolvedPlateNumber ? { plateNumber: resolvedPlateNumber, vehicleId: resolvedPlateNumber, vehicle: resolvedPlateNumber } : {})
   };
 
+  const dbItems = Array.isArray(rest.items) ? rest.items.map(it => ({
+    ...it,
+    name: it.item?.name || it.name || 'Asset',
+    qty: it.quantity != null ? it.quantity : (it.qty != null ? it.qty : 1),
+    quantity: it.quantity != null ? it.quantity : (it.qty != null ? it.qty : 1),
+    price: it.unitPrice != null ? it.unitPrice : (it.price != null ? it.price : 0),
+    unitPrice: it.unitPrice != null ? it.unitPrice : (it.price != null ? it.price : 0),
+    totalPrice: it.totalPrice != null ? it.totalPrice : ((it.quantity || 1) * (it.unitPrice || 0))
+  })) : [];
+
+  const metaCustom = Array.isArray(metadataObj.customItems) ? metadataObj.customItems : (Array.isArray(metadataObj.custom_items) ? metadataObj.custom_items : []);
+  const metaItems = metaCustom.map((it, idx) => ({
+    ...it,
+    name: it.name || it.itemName || it.item?.name || `Item ${idx + 1}`,
+    qty: it.qty != null ? it.qty : (it.quantity != null ? it.quantity : 1),
+    quantity: it.quantity != null ? it.quantity : (it.qty != null ? it.qty : 1),
+    price: it.price != null ? it.price : (it.unitPrice != null ? it.unitPrice : 0),
+    unitPrice: it.unitPrice != null ? it.unitPrice : (it.price != null ? it.price : 0),
+    totalPrice: it.totalPrice != null ? it.totalPrice : ((it.quantity || it.qty || 1) * (it.price || it.unitPrice || 0))
+  }));
+
+  const finalItems = dbItems.length > 0 ? dbItems : metaItems;
+
   return {
     ...enrichedMeta,
     ...rest,
+    items: finalItems,
+    customItems: finalItems,
+    vendor: enrichedMeta.vendor || enrichedMeta.vendor_name || rest.vendor || null,
+    vendorId: enrichedMeta.vendorId || enrichedMeta.vendor_id || rest.vendorId || null,
     driverName: resolvedDriverName || null,
     driver_user_id: resolvedDriverUserId || null,
     driverId: resolvedDriverUserId || null,
@@ -234,6 +282,9 @@ export const findAllOrders = async (tenantId, query) => {
       client: effectiveClient,
       clientId: effectiveClientId,
       items: itemsArr,
+      customItems: metaList.length > 0 ? metaList : itemsArr,
+      vendor: enrichedMeta.vendor || enrichedMeta.vendor_name || rest.vendor || null,
+      vendorId: enrichedMeta.vendorId || enrichedMeta.vendor_id || rest.vendorId || null,
       driverName: resolvedDriverName || null,
       driver_user_id: resolvedDriverUserId || null,
       driverId: resolvedDriverUserId || null,

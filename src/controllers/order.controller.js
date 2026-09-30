@@ -180,9 +180,9 @@ export const getOrderById = async (req, res, next) => {
     const roleName = String(rawRole).toUpperCase();
     const userTenant = req.user?.tenantId ? Number(req.user.tenantId) : 1;
     const isHQStaff = ['SUPER_ADMIN', 'SUPERADMIN', 'ADMIN', 'OPERATIONS', 'LOGISTICS', 'CONCIERGE', 'STAFF', 'PROCUREMENT', 'INVENTORY'].includes(roleName) && userTenant === 1;
-    const tenantIdToFilter = isHQStaff ? (req.query.tenantId ? Number(req.query.tenantId) : null) : resolveTenantId(req);
-
-    const order = await orderService.getOrderById(Number(req.params.id), tenantIdToFilter);
+    const tenantIdToFilter = isHQStaff ? null : resolveTenantId(req);
+    const paramId = !isNaN(Number(req.params.id)) && Number(req.params.id) > 0 ? Number(req.params.id) : req.params.id;
+    const order = await orderService.getOrderById(paramId, tenantIdToFilter);
     sendResponse(res, 200, 'Order fetched successfully', order);
   } catch (error) {
     next(error);
@@ -194,15 +194,16 @@ export const updateOrderStatus = async (req, res, next) => {
     const { status, remarks } = req.body;
     const rawRole = req.user.role?.name || req.user.role || '';
     const roleName = String(rawRole).toUpperCase();
-    const isStaffOrAdmin = ['SUPER_ADMIN', 'ADMIN', 'OPERATIONS', 'LOGISTICS', 'CONCIERGE', 'SAAS_CLIENT', 'BUSINESS_CLIENT', 'STAFF'].includes(roleName);
+    const isStaffOrAdmin = ['SUPER_ADMIN', 'SUPERADMIN', 'ADMIN', 'OPERATIONS', 'LOGISTICS', 'CONCIERGE', 'SAAS_CLIENT', 'BUSINESS_CLIENT', 'STAFF'].includes(roleName);
     const tenantIdToFilter = isStaffOrAdmin ? null : resolveTenantId(req);
-
+    const paramId = !isNaN(Number(req.params.id)) && Number(req.params.id) > 0 ? Number(req.params.id) : req.params.id;
     const updatedOrder = await orderService.updateOrderStatus(
-      Number(req.params.id),
+      paramId,
       status,
       tenantIdToFilter,
       req.user.id,
-      remarks || null
+      remarks || null,
+      roleName
     );
     sendResponse(res, 200, 'Order status updated successfully', updatedOrder);
   } catch (error) {
@@ -250,10 +251,17 @@ export const updateOrder = async (req, res, next) => {
   try {
     const rawRole = req.user.role?.name || req.user.role || '';
     const roleName = String(rawRole).toUpperCase();
-    const isStaffOrAdmin = ['SUPER_ADMIN', 'ADMIN', 'OPERATIONS', 'LOGISTICS', 'CONCIERGE', 'SAAS_CLIENT', 'BUSINESS_CLIENT', 'STAFF'].includes(roleName);
+
+    // The Logistics department must have read-only access to the original Marketplace order details
+    if (roleName === 'LOGISTICS') {
+      return sendResponse(res, 403, 'Forbidden: Logistics department has read-only access to order details');
+    }
+
+    const isStaffOrAdmin = ['SUPER_ADMIN', 'ADMIN', 'OPERATIONS', 'CONCIERGE', 'SAAS_CLIENT', 'BUSINESS_CLIENT', 'STAFF'].includes(roleName);
     const tenantIdToFilter = isStaffOrAdmin ? null : resolveTenantId(req);
 
-    const updatedOrder = await orderService.updateOrder(Number(req.params.id), req.body, tenantIdToFilter, req.user.id);
+    const paramId = !isNaN(Number(req.params.id)) && Number(req.params.id) > 0 ? Number(req.params.id) : req.params.id;
+    const updatedOrder = await orderService.updateOrder(paramId, req.body, tenantIdToFilter, req.user.id);
     sendResponse(res, 200, 'Order updated successfully', updatedOrder);
   } catch (error) {
     next(error);

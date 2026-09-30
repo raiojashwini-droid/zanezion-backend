@@ -613,8 +613,12 @@ export const updateDelivery = async (id, data, tenantId, performerId, clientId =
       orderTargetStatus = 'completed';
     } else if (['in_transit', 'en_route', 'dispatched', 'on_way'].includes(normDelStatus)) {
       orderTargetStatus = 'in_transit';
+    } else if (['arrived'].includes(normDelStatus)) {
+      orderTargetStatus = 'arrived';
     } else if (['assigned', 'accepted'].includes(normDelStatus) || (parsedData.assignedTo && parsedData.assignedTo > 0)) {
       orderTargetStatus = 'assigned';
+    } else if (normDelStatus === 'pending' || parsedData.assignedTo === null) {
+      orderTargetStatus = 'logistics';
     }
 
     try {

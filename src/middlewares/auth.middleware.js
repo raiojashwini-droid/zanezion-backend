@@ -183,6 +183,12 @@ export const checkPermission = (routeIdentifier, action) => {
         return next();
       }
 
+      // Explicit read-only constraint for Logistics Department on Orders
+      if (roleNameLower === 'logistics' && routeIdentifier === 'ORDERS' && ['CREATE', 'UPDATE', 'DELETE'].includes(action)) {
+        console.log(`[RBAC] Role: ${roleName} | Route: ${routeIdentifier} | Action: ${action} | Result: FORBIDDEN (Logistics Read-Only on Orders)`);
+        return sendResponse(res, 403, 'Forbidden: Logistics department has read-only access to order details');
+      }
+
       const isCustomerOrStaff = ['business_client', 'business client', 'individual_client', 'individual client', 'unknown', 'guest', 'client', 'saas_client', 'saas client', 'customer', 'concierge', 'staff', 'operations', 'logistics', 'procurement', 'inventory', 'admin', 'super_admin', 'superadmin'].includes(roleNameLower) || roleNameLower.includes('concierge') || roleNameLower.includes('staff') || roleNameLower.includes('admin');
       if (isCustomerOrStaff && action === 'READ' && ['ORDERS', 'CLIENTS', 'USERS', 'VENDORS', 'DELIVERIES', 'WAREHOUSES', 'INVOICES', 'PURCHASE_REQUESTS', 'QUOTATIONS', 'RFQS', 'PURCHASE_ORDERS', 'ITEMS', 'STOCK', 'PLANS', 'TRACKING', 'MISSIONS', 'ROUTES', 'URGENT', 'SUPPORT', 'CONCIERGE', 'ROLES', 'PROJECTS', 'DEPARTMENTS', 'DESIGNATIONS'].includes(routeIdentifier)) {
         console.log(`[RBAC] Role: ${roleName} | Route: ${routeIdentifier} | Action: READ | Result: ALLOWED (Staff/Customer Bypass)`);

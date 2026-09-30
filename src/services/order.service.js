@@ -361,22 +361,88 @@ export const getOrderById = async (id, tenantId) => {
   return order;
 };
 
-export const updateOrderStatus = async (id, status, tenantId, performerId, remarks) => {
+export const updateOrderStatus = async (id, status, tenantId, performerId, remarks, performerRole) => {
   const order = await getOrderById(id, tenantId);
+  const realOrderId = order.id;
 
   if (order.status === 'cancelled') {
     throw new AppError('Cannot update a cancelled order', 400);
   }
+
+  const normStatus = String(status).toLowerCase().replace(/\s+/g, '_');
 
   // --- Build workflow history entry ---
   const currentMeta = typeof order.metadata === 'string'
     ? JSON.parse(order.metadata)
     : (order.metadata || {});
 
+  const currentStatus = String(order.status || currentMeta.chauffeur_status || '').toLowerCase().replace(/\s+/g, '_');
+
+  const isChauffeur = order.orderType === 'CHAUFFEUR' || 
+                      order.missionType === 'CHAUFFEUR' || 
+                      String(currentMeta.missionType || '').toUpperCase() === 'CHAUFFEUR' || 
+                      String(currentMeta.orderType || '').toUpperCase() === 'CHAUFFEUR' ||
+                      currentMeta.serviceType !== undefined ||
+                      currentMeta.chauffeur_status !== undefined ||
+                      Boolean(currentMeta.pickupLocation && currentMeta.dropLocation);
+
+  // Controlled status transitions for Chauffeur lifecycle:
+  // Pending → Accepted → En Route → Arrived → Completed
+  if (isChauffeur) {
+    if (['completed', 'delivered'].includes(currentStatus)) {
+      throw new AppError('Chauffeur trip is already completed and cannot undergo further status transitions.', 400);
+    }
+
+    if (['en_route', 'in_transit'].includes(currentStatus)) {
+      // Prevent jumping straight to completed without Arrived
+      if (['completed', 'delivered'].includes(normStatus)) {
+        throw new AppError("Invalid transition: Chauffeur trip must reach 'arrived' status before it can be marked as completed.", 400);
+      }
+      // Prevent reverting to earlier states
+      if (['accepted', 'assigned', 'pending', 'rejected'].includes(normStatus)) {
+        throw new AppError(`Invalid transition: Cannot revert in-progress chauffeur trip from '${currentStatus}' to '${normStatus}'.`, 400);
+      }
+      // Exceptional cancellation restriction
+      if (['cancelled', 'canceled', 'rejected'].includes(normStatus)) {
+        const isAdmin = ['SUPER_ADMIN', 'SUPERADMIN', 'ADMIN'].includes(String(performerRole || '').toUpperCase());
+        if (!isAdmin) {
+          throw new AppError('Only authorized Admin users can perform exceptional cancellation of an in-progress chauffeur trip.', 403);
+        }
+        if (!remarks || !remarks.trim()) {
+          throw new AppError('A mandatory cancellation reason is required for exceptional cancellation of an in-progress chauffeur trip.', 400);
+        }
+      }
+    }
+
+    if (currentStatus === 'arrived') {
+      // Prevent reverting to earlier states
+      if (['en_route', 'in_transit', 'accepted', 'assigned', 'pending', 'rejected'].includes(normStatus)) {
+        throw new AppError(`Invalid transition: Cannot revert arrived chauffeur trip to '${normStatus}'.`, 400);
+      }
+      // Exceptional cancellation restriction
+      if (['cancelled', 'canceled', 'rejected'].includes(normStatus)) {
+        const isAdmin = ['SUPER_ADMIN', 'SUPERADMIN', 'ADMIN'].includes(String(performerRole || '').toUpperCase());
+        if (!isAdmin) {
+          throw new AppError('Only authorized Admin users can perform exceptional cancellation of an arrived chauffeur trip.', 403);
+        }
+        if (!remarks || !remarks.trim()) {
+          throw new AppError('A mandatory cancellation reason is required for exceptional cancellation of an arrived chauffeur trip.', 400);
+        }
+      }
+    }
+
+    if (['accepted', 'assigned', 'approved'].includes(currentStatus)) {
+      // Cannot jump to arrived or completed without en_route
+      if (['arrived', 'completed', 'delivered'].includes(normStatus)) {
+        throw new AppError("Invalid transition: Chauffeur trip must start ('en_route') before reaching 'arrived' or 'completed'.", 400);
+      }
+    }
+  }
+
   const existingHistory = Array.isArray(currentMeta.workflowHistory) ? currentMeta.workflowHistory : [];
 
   const historyEntry = {
-    department: String(status).toLowerCase(),
+    department: normStatus,
     previousDepartment: String(order.status || '').toLowerCase(),
     movedBy: performerId,
     movedAt: new Date().toISOString(),
@@ -385,8 +451,9 @@ export const updateOrderStatus = async (id, status, tenantId, performerId, remar
 
   const newMetadata = {
     ...currentMeta,
-    status: String(status).toLowerCase(),
-    currentDepartment: String(status).toLowerCase(),
+    status: normStatus,
+    chauffeur_status: normStatus,
+    currentDepartment: normStatus,
     workflowHistory: [...existingHistory, historyEntry]
   };
 
@@ -394,47 +461,52 @@ export const updateOrderStatus = async (id, status, tenantId, performerId, remar
 
   await prisma.$transaction(async (tx) => {
     // If transitioning TO approved, Reserve Stock
-    if (status === 'approved') {
+    if (normStatus === 'approved') {
       await validateAndReserveStock(tx, order.items);
     }
 
     // If transitioning FROM approved TO cancelled, Release Stock
-    if (order.status === 'approved' && status === 'cancelled') {
+    if (order.status === 'approved' && normStatus === 'cancelled') {
       await releaseReservedStock(tx, order.items);
     }
 
     // Update order status + persist new metadata with workflow history
     updatedOrder = await tx.order.update({
-      where: { id },
+      where: { id: realOrderId },
       data: {
-        status,
+        status: normStatus,
         metadata: newMetadata
       }
     });
 
     // If order is completed/delivered, sync associated deliveries
-    if (['completed', 'delivered'].includes(String(status).toLowerCase())) {
+    if (['completed', 'delivered'].includes(normStatus)) {
       await tx.delivery.updateMany({
-        where: { orderId: id },
+        where: { orderId: realOrderId },
         data: { status: 'delivered' }
       }).catch(() => null);
-    } else if (['in_transit', 'en_route', 'dispatched'].includes(String(status).toLowerCase())) {
+    } else if (normStatus === 'arrived') {
       await tx.delivery.updateMany({
-        where: { orderId: id },
-        data: { status: 'in_transit' }
+        where: { orderId: realOrderId },
+        data: { status: 'arrived' }
       }).catch(() => null);
-    } else if (['assigned', 'accepted'].includes(String(status).toLowerCase())) {
+    } else if (['in_transit', 'en_route', 'dispatched'].includes(normStatus)) {
       await tx.delivery.updateMany({
-        where: { orderId: id },
+        where: { orderId: realOrderId },
+        data: { status: normStatus === 'en_route' ? 'en_route' : 'in_transit' }
+      }).catch(() => null);
+    } else if (['assigned', 'accepted'].includes(normStatus)) {
+      await tx.delivery.updateMany({
+        where: { orderId: realOrderId },
         data: { status: 'assigned' }
       }).catch(() => null);
-    } else if (['cancelled', 'rejected', 'canceled'].includes(String(status).toLowerCase())) {
+    } else if (['cancelled', 'rejected', 'canceled'].includes(normStatus)) {
       await tx.delivery.updateMany({
-        where: { orderId: id },
+        where: { orderId: realOrderId },
         data: { status: 'cancelled' }
       }).catch(() => null);
       await tx.mission.updateMany({
-        where: { orderId: id },
+        where: { orderId: realOrderId },
         data: { status: 'cancelled' }
       }).catch(() => null);
     }
@@ -463,13 +535,31 @@ export const updateOrderStatus = async (id, status, tenantId, performerId, remar
 export const updateOrder = async (id, data, tenantId, performerId) => {
   const order = await getOrderById(id, tenantId);
   const { items, ...orderData } = data;
-  const customItems = [];
-  if (items && Array.isArray(items)) {
-    for (const item of items) {
-      if (!item.itemId || !item.warehouseId) {
-        customItems.push(item);
-      }
-    }
+
+  const incomingItems = (items && Array.isArray(items) && items.length > 0)
+    ? items
+    : ((data.customItems && Array.isArray(data.customItems) && data.customItems.length > 0)
+      ? data.customItems
+      : ((data.manifestItems && Array.isArray(data.manifestItems) && data.manifestItems.length > 0)
+        ? data.manifestItems
+        : null));
+
+  let formattedCustomItems = [];
+  if (incomingItems && incomingItems.length > 0) {
+    formattedCustomItems = incomingItems.map((itm, idx) => {
+      const name = itm.name || itm.item?.name || itm.itemName || itm.title || itm.description || `Item ${idx + 1}`;
+      const qty = parseInt(itm.qty != null ? itm.qty : (itm.quantity != null ? itm.quantity : 1), 10) || 1;
+      const price = parseFloat(itm.price != null ? itm.price : (itm.unitPrice != null ? itm.unitPrice : 0)) || 0;
+      return {
+        ...itm,
+        name,
+        qty,
+        quantity: qty,
+        price,
+        unitPrice: price,
+        totalPrice: parseFloat((qty * price).toFixed(2))
+      };
+    });
   }
 
   // Relational and immutable fields that Prisma OrderUpdateInput rejects
@@ -554,13 +644,33 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
     metadataExt.client = originalClientObj;
   }
 
-  if (data.totalAmount !== undefined || data.total_amount !== undefined) {
-    dbData.totalAmount = Number(data.totalAmount || data.total_amount || 0);
+  // Persist Vendor in metadata
+  const incomingVendor = data.vendor || data.vendor_name || data.vendorName || metadataObj.vendor || metadataObj.vendor_name;
+  const incomingVendorId = data.vendorId || data.vendor_id || metadataObj.vendorId || metadataObj.vendor_id;
+  if (incomingVendor) {
+    const vName = typeof incomingVendor === 'object' ? (incomingVendor.name || incomingVendor.companyName) : String(incomingVendor);
+    metadataExt.vendor = vName;
+    metadataExt.vendor_name = vName;
+    metadataExt.vendorName = vName;
+  }
+  if (incomingVendorId && !isNaN(Number(incomingVendorId))) {
+    metadataExt.vendorId = Number(incomingVendorId);
+    metadataExt.vendor_id = Number(incomingVendorId);
   }
 
-  if (customItems.length > 0) {
-    metadataExt.customItems = customItems;
-    const c0 = customItems[0];
+  // Calculate and assign total amount
+  if (data.totalAmount !== undefined || data.total_amount !== undefined) {
+    dbData.totalAmount = Number(data.totalAmount || data.total_amount || 0);
+  } else if (formattedCustomItems.length > 0) {
+    const computedTotal = formattedCustomItems.reduce((acc, it) => acc + (it.totalPrice || (it.quantity * it.unitPrice)), 0);
+    if (computedTotal > 0) {
+      dbData.totalAmount = parseFloat(computedTotal.toFixed(2));
+    }
+  }
+
+  if (formattedCustomItems.length > 0) {
+    metadataExt.customItems = formattedCustomItems;
+    const c0 = formattedCustomItems[0];
     if (originalCustomerId) {
       c0.userId = originalCustomerId;
       c0.user_id = originalCustomerId;
@@ -576,6 +686,67 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
     if (originalClientName) {
       c0.clientName = originalClientName;
     }
+
+    // Synchronize Prisma orderItem records with updated line items
+    try {
+      const existingOrderItems = await prisma.orderItem.findMany({
+        where: { orderId: order.id },
+        include: { deliveryItems: true }
+      });
+
+      for (let i = 0; i < formattedCustomItems.length; i++) {
+        const itemSpec = formattedCustomItems[i];
+        let resolvedItemId = itemSpec.itemId && !isNaN(Number(itemSpec.itemId)) ? Number(itemSpec.itemId) : null;
+        if (!resolvedItemId && itemSpec.name) {
+          const foundItem = await prisma.item.findFirst({
+            where: {
+              OR: [
+                { name: { equals: String(itemSpec.name).trim() } },
+                { name: { contains: String(itemSpec.name).trim() } }
+              ]
+            }
+          });
+          if (foundItem) resolvedItemId = foundItem.id;
+        }
+
+        if (existingOrderItems[i]) {
+          await prisma.orderItem.update({
+            where: { id: existingOrderItems[i].id },
+            data: {
+              quantity: Number(itemSpec.quantity),
+              unitPrice: Number(itemSpec.unitPrice),
+              totalPrice: Number(itemSpec.totalPrice),
+              ...(resolvedItemId ? { itemId: resolvedItemId } : {})
+            }
+          });
+        } else if (resolvedItemId) {
+          await prisma.orderItem.create({
+            data: {
+              tenantId: order.tenantId || 1,
+              orderId: order.id,
+              itemId: resolvedItemId,
+              warehouseId: itemSpec.warehouseId ? Number(itemSpec.warehouseId) : (existingOrderItems[0]?.warehouseId || 1),
+              quantity: Number(itemSpec.quantity),
+              unitPrice: Number(itemSpec.unitPrice),
+              totalPrice: Number(itemSpec.totalPrice)
+            }
+          });
+        }
+      }
+
+      // If existing records exceed updated items and have no dependent deliveryItems, delete excess
+      if (existingOrderItems.length > formattedCustomItems.length) {
+        for (let j = formattedCustomItems.length; j < existingOrderItems.length; j++) {
+          const excess = existingOrderItems[j];
+          if (!excess.deliveryItems || excess.deliveryItems.length === 0) {
+            await prisma.orderItem.delete({ where: { id: excess.id } }).catch(() => {});
+          }
+        }
+      }
+    } catch (orderItemSyncErr) {
+      console.warn('[OrderItem Sync Warning]', orderItemSyncErr);
+    }
+
     if (c0.passengerName) metadataExt.passengerName = c0.passengerName;
     if (c0.guestName) metadataExt.guestName = c0.guestName;
     if (c0.numberOfPassengers) {
@@ -691,7 +862,7 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
   };
 
   const updatedOrder = await prisma.order.update({
-    where: { id },
+    where: { id: order.id },
     data: {
       ...dbData,
       status: newStatus,
@@ -704,19 +875,27 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
   if (isChauffeurOrDelivery && (driverName || driverUserId || plateNumber || employee)) {
     try {
       const existingDelivery = await prisma.delivery.findFirst({
-        where: { orderId: id }
+        where: { orderId: order.id }
       });
 
       const delStatus = ['completed', 'delivered'].includes(newStatus)
         ? 'delivered'
-        : (['in_transit', 'en_route'].includes(newStatus) ? 'in_transit' : 'assigned');
+        : (newStatus === 'en_route' ? 'en_route' : (['in_transit', 'en_route'].includes(newStatus) ? 'in_transit' : 'assigned'));
 
       if (existingDelivery) {
+        let existingRemarks = {};
+        if (existingDelivery.remarks) {
+          try { existingRemarks = JSON.parse(existingDelivery.remarks); } catch (_) {}
+        }
+        if (formattedCustomItems.length > 0) {
+          existingRemarks.manifestItems = formattedCustomItems;
+        }
         await prisma.delivery.update({
           where: { id: existingDelivery.id },
           data: {
             ...(employee ? { assignedTo: employee.id } : {}),
             ...(plateNumber ? { vehicleRef: String(plateNumber).trim() } : {}),
+            remarks: JSON.stringify(existingRemarks),
             status: delStatus
           }
         });
@@ -731,7 +910,7 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
           data: {
             tenantId: updatedOrder.tenantId,
             deliveryNumber,
-            orderId: id,
+            orderId: order.id,
             clientId: updatedOrder.clientId,
             assignedTo: employee ? employee.id : null,
             warehouseId: warehouse ? warehouse.id : 1,

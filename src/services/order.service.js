@@ -479,11 +479,21 @@ export const updateOrderStatus = async (id, status, tenantId, performerId, remar
       }
     });
 
-    // If order is completed/delivered, sync associated deliveries
+    // If order is completed/delivered, sync associated deliveries and missions
     if (['completed', 'delivered'].includes(normStatus)) {
       await tx.delivery.updateMany({
         where: { orderId: realOrderId },
         data: { status: 'delivered' }
+      }).catch(() => null);
+      await tx.mission.updateMany({
+        where: {
+          OR: [
+            { orderId: realOrderId },
+            { delivery: { orderId: realOrderId } }
+          ],
+          status: { notIn: ['cancelled'] }
+        },
+        data: { status: 'completed' }
       }).catch(() => null);
     } else if (normStatus === 'arrived') {
       await tx.delivery.updateMany({
@@ -495,9 +505,29 @@ export const updateOrderStatus = async (id, status, tenantId, performerId, remar
         where: { orderId: realOrderId },
         data: { status: normStatus === 'en_route' ? 'en_route' : 'in_transit' }
       }).catch(() => null);
+      await tx.mission.updateMany({
+        where: {
+          OR: [
+            { orderId: realOrderId },
+            { delivery: { orderId: realOrderId } }
+          ],
+          status: { notIn: ['completed', 'cancelled'] }
+        },
+        data: { status: 'en_route' }
+      }).catch(() => null);
     } else if (['assigned', 'accepted'].includes(normStatus)) {
       await tx.delivery.updateMany({
         where: { orderId: realOrderId },
+        data: { status: 'assigned' }
+      }).catch(() => null);
+      await tx.mission.updateMany({
+        where: {
+          OR: [
+            { orderId: realOrderId },
+            { delivery: { orderId: realOrderId } }
+          ],
+          status: 'pending'
+        },
         data: { status: 'assigned' }
       }).catch(() => null);
     } else if (['cancelled', 'rejected', 'canceled'].includes(normStatus)) {
@@ -506,7 +536,12 @@ export const updateOrderStatus = async (id, status, tenantId, performerId, remar
         data: { status: 'cancelled' }
       }).catch(() => null);
       await tx.mission.updateMany({
-        where: { orderId: realOrderId },
+        where: {
+          OR: [
+            { orderId: realOrderId },
+            { delivery: { orderId: realOrderId } }
+          ]
+        },
         data: { status: 'cancelled' }
       }).catch(() => null);
     }

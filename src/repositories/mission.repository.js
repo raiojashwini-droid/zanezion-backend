@@ -36,8 +36,35 @@ export const findMissionById = async (id) => {
   return await prisma.mission.findFirst({
     where: isNumeric ? { id: parseInt(id, 10) } : { missionNumber: id },
     include: {
-      delivery: { include: { items: true, client: true } },
-      assignee: { select: { firstName: true, lastName: true, vehiclePlate: true, vehicleModel: true, vehicleType: true } }
+      delivery: {
+        include: {
+          items: { include: { item: true } },
+          client: true,
+          order: {
+            include: {
+              client: true,
+              items: { include: { item: true } }
+            }
+          }
+        }
+      },
+      order: {
+        include: {
+          client: true,
+          items: { include: { item: true } }
+        }
+      },
+      assignee: {
+        select: {
+          id: true,
+          userId: true,
+          firstName: true,
+          lastName: true,
+          vehiclePlate: true,
+          vehicleModel: true,
+          vehicleType: true
+        }
+      }
     }
   });
 };
@@ -60,8 +87,35 @@ export const findAllMissions = async (tenantId, query) => {
       take: Number(limit),
       orderBy: { createdAt: 'desc' },
       include: {
-        delivery: { select: { deliveryNumber: true, pickupLocation: true, dropLocation: true, client: { select: { companyName: true, address: true, city: true, country: true } } } },
-          assignee: { select: { firstName: true, lastName: true, vehiclePlate: true, vehicleModel: true, vehicleType: true } }
+        delivery: {
+          include: {
+            items: { include: { item: true } },
+            client: true,
+            order: {
+              include: {
+                client: true,
+                items: { include: { item: true } }
+              }
+            }
+          }
+        },
+        order: {
+          include: {
+            client: true,
+            items: { include: { item: true } }
+          }
+        },
+        assignee: {
+          select: {
+            id: true,
+            userId: true,
+            firstName: true,
+            lastName: true,
+            vehiclePlate: true,
+            vehicleModel: true,
+            vehicleType: true
+          }
+        }
       }
     }),
     prisma.mission.count({ where })

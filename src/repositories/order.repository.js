@@ -406,7 +406,7 @@ export const findAllOrders = async (tenantId, query) => {
       if (applyCurrentDeptFilter === 'operations' && ['operations', 'submitted', 'review', 'approved', 'ready_for_delivery'].includes(rawStatus)) return true;
       if (applyCurrentDeptFilter === 'procurement' && ['procurement', 'purchase_requested'].includes(rawStatus)) return true;
       if (applyCurrentDeptFilter === 'inventory' && ['inventory', 'stock_reserved'].includes(rawStatus)) return true;
-      if (applyCurrentDeptFilter === 'logistics' && ['logistics', 'dispatched', 'in_transit'].includes(rawStatus)) return true;
+      if (applyCurrentDeptFilter === 'logistics' && ['logistics', 'dispatched', 'in_transit', 'en_route'].includes(rawStatus)) return true;
       if (applyCurrentDeptFilter === 'concierge' && ['concierge'].includes(rawStatus)) return true;
 
       return rawStatus === applyCurrentDeptFilter;
@@ -415,7 +415,14 @@ export const findAllOrders = async (tenantId, query) => {
   if (applyPassedThroughFilter) {
     mappedOrders = mappedOrders.filter(o => {
       const history = Array.isArray(o.metadata?.workflowHistory) ? o.metadata.workflowHistory : [];
-      return history.some(h => String(h.department || '').toLowerCase() === applyPassedThroughFilter);
+      if (history.some(h => String(h.department || '').toLowerCase() === applyPassedThroughFilter)) return true;
+      if (applyPassedThroughFilter === 'logistics') {
+        const rawStatus = String(o.status || '').toLowerCase();
+        if (['logistics', 'dispatched', 'in_transit', 'en_route', 'delivered', 'completed'].includes(rawStatus) || (o.deliveries && o.deliveries.length > 0)) {
+          return true;
+        }
+      }
+      return false;
     });
   }
 

@@ -6,16 +6,40 @@ import AppError from '../utils/AppError.js';
 import { logAudit } from '../utils/audit.js';
 
 export const createMission = async (data, performerId, tenantId) => {
+  let delivery = null;
   if (data.deliveryId) {
-    const delivery = await deliveryRepo.findDeliveryById(data.deliveryId);
+    delivery = await prisma.delivery.findUnique({
+      where: { id: Number(data.deliveryId) },
+      include: {
+        order: { include: { client: true, items: { include: { item: true } } } },
+        client: true,
+        items: { include: { item: true } }
+      }
+    });
     if (!delivery || (tenantId !== null && delivery.tenantId !== tenantId)) {
       throw new AppError('Delivery not found', 404);
     }
 
-    // Check if an active mission already exists for this delivery
-    const activeMission = await prisma.mission.findFirst({
-      where: { deliveryId: delivery.id, status: { notIn: ['completed', 'cancelled'] } }
-    });
+    if (!data.orderId && delivery.orderId) {
+      data.orderId = delivery.orderId;
+    }
+    const delRemarks = typeof delivery.remarks === 'string' ? (() => { try { return JSON.parse(delivery.remarks); } catch { return {}; } })() : (delivery.remarks || {});
+    const orderMeta = delivery.order?.metadata ? (typeof delivery.order.metadata === 'string' ? (() => { try { return JSON.parse(delivery.order.metadata); } catch { return {}; } })() : delivery.order.metadata) : {};
+
+    data.metadata = {
+      ...(typeof data.metadata === 'object' ? data.metadata : {}),
+      orderId: delivery.orderId || delivery.order?.orderNumber,
+      orderNumber: delivery.order?.orderNumber,
+      deliveryNumber: delivery.deliveryNumber,
+      deliveryId: delivery.id,
+      pickupLocation: delivery.pickupLocation || orderMeta.pickupLocation || orderMeta.pickup_location,
+      dropLocation: delivery.dropLocation || orderMeta.dropLocation || orderMeta.location,
+      destination_type: data.metadata?.destination_type || delivery.dropLocation || 'Client Site',
+      clientName: delivery.client?.companyName || delivery.client?.name || orderMeta.client,
+      clientId: delivery.clientId || delivery.order?.clientId,
+      items: delRemarks.manifestItems || delRemarks.customItems || orderMeta.items || orderMeta.customItems || delivery.items,
+      projectId: orderMeta.projectId || (delivery.order?.orderType === 'Project' ? delivery.order.id : undefined)
+    };
   }
 
   let employee = null;
@@ -70,7 +94,14 @@ export const createMission = async (data, performerId, tenantId) => {
     if (activeMission) {
       await prisma.mission.update({
         where: { id: activeMission.id },
-        data: { assignedEmployeeId: employee.id }
+        data: {
+          assignedEmployeeId: employee.id,
+          orderId: data.orderId || activeMission.orderId,
+          metadata: {
+            ...(typeof activeMission.metadata === 'object' ? activeMission.metadata : {}),
+            ...(typeof data.metadata === 'object' ? data.metadata : {})
+          }
+        }
       });
       await prisma.delivery.update({
         where: { id: data.deliveryId },
@@ -79,7 +110,6 @@ export const createMission = async (data, performerId, tenantId) => {
       return await missionRepo.findMissionById(activeMission.id);
     }
   }
-
 
   const newMission = await missionRepo.createMission(data, tenantId);
 
@@ -104,11 +134,11 @@ export const startMission = async (id, tenantId, performerId) => {
 
   await prisma.$transaction(async (tx) => {
     // 1. Update Mission
-    await missionRepo.updateMissionStatus(tx, mission.id, 'in_progress', { startDate: new Date() });
+    await missionRepo.updateMissionStatus(tx, mission.id, 'en_route', { startDate: new Date() });
 
     // 2. Update Delivery and Inventory ONLY if this is a Delivery Mission
     if (delivery) {
-      await deliveryRepo.updateDeliveryStatus(tx, delivery.id, 'dispatched', { dispatchDate: new Date() });
+      await deliveryRepo.updateDeliveryStatus(tx, delivery.id, 'en_route', { dispatchDate: new Date() });
 
       // 3. Dispatch Engine: Deduct Inventory Stock (Quantity & Reserved)
       for (const item of delivery.items) {
@@ -143,6 +173,42 @@ export const startMission = async (id, tenantId, performerId) => {
         });
       }
     } // End if delivery
+
+    // 4. Update linked order to en_route
+    let linkedOrderId = mission.orderId || delivery?.orderId;
+    if (!linkedOrderId && typeof mission.metadata === 'object') {
+      linkedOrderId = mission.metadata?.orderId || mission.metadata?.orderRef;
+    }
+    if (linkedOrderId && !isNaN(Number(linkedOrderId))) {
+      try {
+        const order = await tx.order.findUnique({ where: { id: Number(linkedOrderId) } });
+        if (order) {
+          const meta = typeof order.metadata === 'string' ? JSON.parse(order.metadata) : (order.metadata || {});
+          const hist = Array.isArray(meta.workflowHistory) ? meta.workflowHistory : [];
+          await tx.order.update({
+            where: { id: Number(linkedOrderId) },
+            data: {
+              status: 'en_route',
+              metadata: {
+                ...meta,
+                status: 'en_route',
+                currentDepartment: 'logistics',
+                workflowHistory: [
+                  ...hist,
+                  {
+                    department: 'logistics',
+                    previousDepartment: String(order.status || '').toLowerCase(),
+                    movedBy: performerId,
+                    movedAt: new Date().toISOString(),
+                    remarks: `Dispatched via Mission ${mission.missionNumber}`
+                  }
+                ]
+              }
+            }
+          });
+        }
+      } catch (_) {}
+    }
   }, { timeout: 60000 });
 
   await logAudit({
@@ -212,6 +278,39 @@ export const submitPOD = async (id, podData, tenantId, performerId) => {
           }
         }
       }
+
+      // Also update linked order to completed
+      if (delivery.orderId) {
+        try {
+          const ord = await tx.order.findUnique({ where: { id: Number(delivery.orderId) } });
+          if (ord) {
+            const meta = typeof ord.metadata === 'string' ? JSON.parse(ord.metadata) : (ord.metadata || {});
+            const hist = Array.isArray(meta.workflowHistory) ? meta.workflowHistory : [];
+            await tx.order.update({
+              where: { id: Number(delivery.orderId) },
+              data: {
+                status: 'completed',
+                metadata: {
+                  ...meta,
+                  status: 'completed',
+                  currentDepartment: 'logistics',
+                  podData: podData || meta.podData,
+                  workflowHistory: [
+                    ...hist,
+                    {
+                      department: 'logistics',
+                      previousDepartment: String(ord.status || '').toLowerCase(),
+                      movedBy: performerId,
+                      movedAt: new Date().toISOString(),
+                      remarks: `Delivered & POD Submitted for Delivery ${delivery.deliveryNumber}`
+                    }
+                  ]
+                }
+              }
+            });
+          }
+        } catch (_) {}
+      }
     }, { timeout: 60000 });
 
     await logAudit({
@@ -236,10 +335,47 @@ export const submitPOD = async (id, podData, tenantId, performerId) => {
     // 2. Update Mission & Linked Orders
     await missionRepo.updateMissionStatus(tx, mission.id, 'completed', { endDate: new Date() });
 
-    if (mission.orderId) {
+    let linkedOrderId = mission.orderId || mission.delivery?.orderId;
+    if (!linkedOrderId && typeof mission.metadata === 'object') {
+      linkedOrderId = mission.metadata?.orderId || mission.metadata?.orderRef;
+    }
+    if (linkedOrderId && !isNaN(Number(linkedOrderId))) {
+      try {
+        const order = await tx.order.findUnique({ where: { id: Number(linkedOrderId) } });
+        if (order) {
+          const meta = typeof order.metadata === 'string' ? JSON.parse(order.metadata) : (order.metadata || {});
+          const hist = Array.isArray(meta.workflowHistory) ? meta.workflowHistory : [];
+          await tx.order.update({
+            where: { id: Number(linkedOrderId) },
+            data: {
+              status: 'completed',
+              metadata: {
+                ...meta,
+                status: 'completed',
+                currentDepartment: 'logistics',
+                podData: podData || meta.podData,
+                workflowHistory: [
+                  ...hist,
+                  {
+                    department: 'logistics',
+                    previousDepartment: String(order.status || '').toLowerCase(),
+                    movedBy: performerId,
+                    movedAt: new Date().toISOString(),
+                    remarks: `Delivered & POD Submitted via Mission ${mission.missionNumber}`
+                  }
+                ]
+              }
+            }
+          });
+        }
+      } catch (_) {}
+    }
+
+    const linkedProjId = typeof mission.metadata === 'object' ? mission.metadata?.projectId : null;
+    if (linkedProjId && Number(linkedProjId) !== Number(linkedOrderId) && !isNaN(Number(linkedProjId))) {
       try {
         await tx.order.update({
-          where: { id: mission.orderId },
+          where: { id: Number(linkedProjId) },
           data: { status: 'completed' }
         });
       } catch (_) {}
@@ -565,6 +701,40 @@ export const updateMissionStatus = async (id, status, tenantId, performerId) => 
     await prisma.mission.update({ where: { id: mission.id }, data: { status: 'en_route' } });
     if (mission.deliveryId) {
       await prisma.delivery.update({ where: { id: mission.deliveryId }, data: { status: 'en_route' } });
+    }
+    let linkedOrderId = mission.orderId || mission.delivery?.orderId;
+    if (!linkedOrderId && typeof mission.metadata === 'object') {
+      linkedOrderId = mission.metadata?.orderId || mission.metadata?.orderRef;
+    }
+    if (linkedOrderId && !isNaN(Number(linkedOrderId))) {
+      try {
+        const order = await prisma.order.findUnique({ where: { id: Number(linkedOrderId) } });
+        if (order) {
+          const meta = typeof order.metadata === 'string' ? JSON.parse(order.metadata) : (order.metadata || {});
+          const hist = Array.isArray(meta.workflowHistory) ? meta.workflowHistory : [];
+          await prisma.order.update({
+            where: { id: Number(linkedOrderId) },
+            data: {
+              status: 'en_route',
+              metadata: {
+                ...meta,
+                status: 'en_route',
+                currentDepartment: 'logistics',
+                workflowHistory: [
+                  ...hist,
+                  {
+                    department: 'logistics',
+                    previousDepartment: String(order.status || '').toLowerCase(),
+                    movedBy: performerId,
+                    movedAt: new Date().toISOString(),
+                    remarks: `Status updated to en_route via Mission ${mission.missionNumber}`
+                  }
+                ]
+              }
+            }
+          });
+        }
+      } catch (_) {}
     }
     return await missionRepo.findMissionById(id);
   } else if (newStatus === 'completed' || newStatus === 'delivered') {

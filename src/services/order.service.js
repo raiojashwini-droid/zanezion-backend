@@ -378,13 +378,16 @@ export const updateOrderStatus = async (id, status, tenantId, performerId, remar
 
   const currentStatus = String(order.status || currentMeta.chauffeur_status || '').toLowerCase().replace(/\s+/g, '_');
 
-  const isChauffeur = order.orderType === 'CHAUFFEUR' || 
+  let isChauffeur = order.orderType === 'CHAUFFEUR' || 
                       order.missionType === 'CHAUFFEUR' || 
                       String(currentMeta.missionType || '').toUpperCase() === 'CHAUFFEUR' || 
                       String(currentMeta.orderType || '').toUpperCase() === 'CHAUFFEUR' ||
                       currentMeta.serviceType !== undefined ||
-                      currentMeta.chauffeur_status !== undefined ||
-                      Boolean(currentMeta.pickupLocation && currentMeta.dropLocation);
+                      currentMeta.chauffeur_status !== undefined;
+                      
+  if (order.orderType === 'Delivery' || currentMeta.missionType === 'Delivery' || currentMeta.manifestItems) {
+    isChauffeur = false;
+  }
 
   // Controlled status transitions for Chauffeur lifecycle:
   // Pending → Accepted → En Route → Arrived → Completed

@@ -82,12 +82,27 @@ export const findAllDeliveries = async (tenantId, query) => {
 
   const where = {
     ...(tenantId !== null && { tenantId }),
-    ...(search && { deliveryNumber: { contains: search } }),
     ...(status && { status }),
     ...(warehouseId && { warehouseId: Number(warehouseId) }),
     ...(assignedTo && { assignedTo: Number(assignedTo) }),
     ...(clientId && { clientId: Number(clientId) })
   };
+
+  if (search) {
+    const numSearch = !isNaN(Number(search)) ? Number(search) : undefined;
+    const searchTerms = [
+      { deliveryNumber: { contains: search } },
+      { order: { orderNumber: { contains: search } } },
+      { items: { some: { item: { name: { contains: search } } } } }
+    ];
+    
+    if (numSearch !== undefined) {
+      searchTerms.push({ id: numSearch });
+      searchTerms.push({ orderId: numSearch });
+    }
+    
+    where.OR = searchTerms;
+  }
 
   const [deliveries, total] = await Promise.all([
     prisma.delivery.findMany({

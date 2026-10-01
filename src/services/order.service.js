@@ -864,8 +864,8 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
     metadataExt.vehicle = String(plateNumber).trim();
   }
 
-  if (customItems.length > 0 || (metadataExt.customItems && metadataExt.customItems.length > 0)) {
-    const targetCustomItems = metadataExt.customItems || customItems;
+  const targetCustomItems = metadataExt.customItems || formattedCustomItems || (Array.isArray(metadataObj.customItems) ? metadataObj.customItems : []);
+  if (Array.isArray(targetCustomItems) && targetCustomItems.length > 0) {
     if (targetCustomItems[0]) {
       if (plateNumber) {
         targetCustomItems[0].plateNumber = String(plateNumber).trim();
@@ -880,6 +880,7 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
         targetCustomItems[0].driverId = driverUserId;
       }
     }
+    metadataExt.customItems = targetCustomItems;
   }
 
   if (driverName || driverUserId) {

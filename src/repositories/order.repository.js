@@ -122,6 +122,22 @@ export const findOrderById = async (id) => {
         }
       }
     });
+
+    if (!order && !id.trim().toUpperCase().startsWith('ORD-')) {
+      order = await prisma.order.findFirst({
+        where: { orderNumber: `ORD-${id.trim()}` },
+        include: {
+          items: { include: { item: true } },
+          client: true,
+          creator: { select: { firstName: true, lastName: true } },
+          deliveries: {
+            include: {
+              assignee: { select: { firstName: true, lastName: true, userId: true } }
+            }
+          }
+        }
+      });
+    }
   }
 
   if (!order) return null;

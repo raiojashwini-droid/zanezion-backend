@@ -683,17 +683,33 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
   }
 
   // Persist Vendor in metadata
-  const incomingVendor = data.vendor || data.vendor_name || data.vendorName || metadataObj.vendor || metadataObj.vendor_name;
-  const incomingVendorId = data.vendorId || data.vendor_id || metadataObj.vendorId || metadataObj.vendor_id;
-  if (incomingVendor) {
-    const vName = typeof incomingVendor === 'object' ? (incomingVendor.name || incomingVendor.companyName) : String(incomingVendor);
+  if (data.vendor !== undefined || data.vendor_name !== undefined || data.vendorName !== undefined) {
+    const rawV = data.vendor !== undefined ? data.vendor : (data.vendor_name !== undefined ? data.vendor_name : data.vendorName);
+    const vName = typeof rawV === 'object' && rawV ? (rawV.name || rawV.companyName || '') : String(rawV || '').trim();
     metadataExt.vendor = vName;
     metadataExt.vendor_name = vName;
     metadataExt.vendorName = vName;
+  } else if (metadataObj.vendor || metadataObj.vendor_name) {
+    metadataExt.vendor = metadataObj.vendor || metadataObj.vendor_name;
+    metadataExt.vendor_name = metadataObj.vendor || metadataObj.vendor_name;
   }
-  if (incomingVendorId && !isNaN(Number(incomingVendorId))) {
-    metadataExt.vendorId = Number(incomingVendorId);
-    metadataExt.vendor_id = Number(incomingVendorId);
+
+  if (data.vendorId !== undefined || data.vendor_id !== undefined) {
+    const rawVId = data.vendorId !== undefined ? data.vendorId : data.vendor_id;
+    const vId = rawVId && !isNaN(Number(rawVId)) ? Number(rawVId) : (rawVId || null);
+    metadataExt.vendorId = vId;
+    metadataExt.vendor_id = vId;
+  } else if (metadataObj.vendorId || metadataObj.vendor_id) {
+    metadataExt.vendorId = metadataObj.vendorId || metadataObj.vendor_id;
+    metadataExt.vendor_id = metadataObj.vendorId || metadataObj.vendor_id;
+  }
+
+  // Persist Order Type
+  const incomingOrderType = data.orderType || data.type || orderData.orderType || orderData.type;
+  if (incomingOrderType) {
+    dbData.orderType = String(incomingOrderType);
+    metadataExt.orderType = String(incomingOrderType);
+    metadataExt.type = String(incomingOrderType);
   }
 
   // Calculate and assign total amount

@@ -16,9 +16,10 @@ export const createOrder = async (data, items, tenantId, tx = null) => {
   const itemsArray = items || [];
   let computedTotalAmount = itemsArray.reduce((sum, item) => sum + (item.quantity * item.unitPrice), 0);
   
-  // If no explicit DB items but we have a total amount in data, use it
-  if (computedTotalAmount === 0 && (data.totalAmount !== undefined || data.total_amount !== undefined)) {
-      computedTotalAmount = Number(data.totalAmount || data.total_amount || 0);
+  // If passed total amount in data includes shipping/transport or extra fees, prioritize it
+  const passedTotalAmount = Number(data.totalAmount !== undefined ? data.totalAmount : (data.total_amount !== undefined ? data.total_amount : 0));
+  if (passedTotalAmount > 0 && (passedTotalAmount > computedTotalAmount || computedTotalAmount === 0)) {
+      computedTotalAmount = passedTotalAmount;
   }
 
   const validDbKeys = [
@@ -196,7 +197,8 @@ export const findOrderById = async (id) => {
     customItems: finalItems,
     vendor: enrichedMeta.vendor || enrichedMeta.vendor_name || rest.vendor || null,
     vendorId: enrichedMeta.vendorId || enrichedMeta.vendor_id || rest.vendorId || null,
-    deliveryType: enrichedMeta.deliveryType || enrichedMeta.delivery_type || rest.deliveryType || 'Road',
+    deliveryType: enrichedMeta.deliveryType || enrichedMeta.delivery_type || enrichedMeta.delivery_mode || enrichedMeta.mode || rest.deliveryType || 'Road',
+    delivery_mode: enrichedMeta.delivery_mode || enrichedMeta.deliveryType || enrichedMeta.delivery_type || rest.deliveryType || 'Road',
     transport_asset: enrichedMeta.transport_asset || enrichedMeta.transportAsset || null,
     transportAsset: enrichedMeta.transport_asset || enrichedMeta.transportAsset || null,
     transport_asset_custom: enrichedMeta.transport_asset_custom || enrichedMeta.transportAssetCustom || enrichedMeta.charter_details || enrichedMeta.charterDetails || null,
@@ -308,7 +310,8 @@ export const findAllOrders = async (tenantId, query) => {
       customItems: metaList.length > 0 ? metaList : itemsArr,
       vendor: enrichedMeta.vendor || enrichedMeta.vendor_name || rest.vendor || null,
       vendorId: enrichedMeta.vendorId || enrichedMeta.vendor_id || rest.vendorId || null,
-      deliveryType: enrichedMeta.deliveryType || enrichedMeta.delivery_type || rest.deliveryType || 'Road',
+      deliveryType: enrichedMeta.deliveryType || enrichedMeta.delivery_type || enrichedMeta.delivery_mode || enrichedMeta.mode || rest.deliveryType || 'Road',
+      delivery_mode: enrichedMeta.delivery_mode || enrichedMeta.deliveryType || enrichedMeta.delivery_type || rest.deliveryType || 'Road',
       transport_asset: enrichedMeta.transport_asset || enrichedMeta.transportAsset || null,
       transportAsset: enrichedMeta.transport_asset || enrichedMeta.transportAsset || null,
       transport_asset_custom: enrichedMeta.transport_asset_custom || enrichedMeta.transportAssetCustom || enrichedMeta.charter_details || enrichedMeta.charterDetails || null,

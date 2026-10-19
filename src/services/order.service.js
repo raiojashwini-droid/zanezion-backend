@@ -237,7 +237,7 @@ export const createOrder = async (data, performerId, tenantId) => {
     }
   } else if (validOrderItems.length > 0) {
     const calcTotal = validOrderItems.reduce((acc, i) => acc + (i.quantity * i.unitPrice), 0);
-    orderData.totalAmount = calcTotal > 0 ? calcTotal : passedTotal;
+    orderData.totalAmount = (passedTotal > calcTotal) ? passedTotal : (calcTotal > 0 ? calcTotal : passedTotal);
   } else {
     orderData.totalAmount = passedTotal;
   }
@@ -249,6 +249,11 @@ export const createOrder = async (data, performerId, tenantId) => {
   const dropLocation = data.dropLocation || data.drop_location || data.location || customItem.dropLocation || existingMeta.dropLocation || '';
   const pickupLocation = data.pickupLocation || data.pickup_location || customItem.pickupLocation || existingMeta.pickupLocation || '';
   const totalDistance = data.totalDistance || data.total_distance || customItem.totalDistance || existingMeta.totalDistance || '';
+
+  const resolvedDeliveryType = data.deliveryType || data.delivery_type || data.delivery_mode || data.deliveryMode || existingMeta.deliveryType || existingMeta.delivery_type || existingMeta.delivery_mode || 'Road';
+  const resolvedTransportAsset = data.transportAsset || data.transport_asset || existingMeta.transportAsset || existingMeta.transport_asset || null;
+  const resolvedTransportAssetCustom = data.transportAssetCustom || data.transport_asset_custom || data.charterDetails || data.charter_details || existingMeta.transportAssetCustom || existingMeta.transport_asset_custom || null;
+  const resolvedIslandLocation = data.islandLocation || data.island_location || existingMeta.islandLocation || existingMeta.island_location || null;
 
   if (isChauffeurOrder) {
     // Determine client name fallback for guestName / passengerName if not explicitly provided
@@ -306,6 +311,15 @@ export const createOrder = async (data, performerId, tenantId) => {
   } else {
     orderData.metadata = {
       ...existingMeta,
+      deliveryType: resolvedDeliveryType,
+      delivery_type: resolvedDeliveryType,
+      delivery_mode: resolvedDeliveryType,
+      transportAsset: resolvedTransportAsset,
+      transport_asset: resolvedTransportAsset,
+      transportAssetCustom: resolvedTransportAssetCustom,
+      transport_asset_custom: resolvedTransportAssetCustom,
+      islandLocation: resolvedIslandLocation,
+      island_location: resolvedIslandLocation,
       pickupLocation: pickupLocation || null,
       dropLocation: dropLocation || null,
       location: dropLocation || null,

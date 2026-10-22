@@ -10,7 +10,10 @@ import prisma from '../config/db.js';
 
 export const loginUser = async (email, password, tenantId, ipAddress, userAgent) => {
   const user = await userRepository.findUserByEmailAndTenant(email, tenantId);
-  if (!user || (user.status?.toUpperCase() !== 'ACTIVE' && user.status?.toUpperCase() !== 'PENDING')) {
+  if (user && (user.status?.toLowerCase() === 'pending_approval' || user.status?.toLowerCase() === 'pending')) {
+    throw new AppError('Your business account application is pending review. An Account Manager will be assigned upon approval.', 403);
+  }
+  if (!user || user.status?.toUpperCase() !== 'ACTIVE') {
     throw new AppError('Invalid credentials or inactive user', 401);
   }
 
@@ -419,12 +422,13 @@ export const signupUser = async (data, file) => {
     }
   });
 
+  const isPendingApproval = (accountType === 'saas' || accountType === 'business');
   const tenantCode = `TENANT-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
   const tenant = await prisma.tenant.create({
     data: {
       organizationId: org.id,
       tenantCode,
-      status: accountType === 'saas' ? 'pending_approval' : 'active'
+      status: isPendingApproval ? 'pending_approval' : 'active'
     }
   });
 
@@ -436,7 +440,7 @@ export const signupUser = async (data, file) => {
       phone,
       roleId: roleRecord.id,
       tenantId: tenant.id,
-      status: 'active'
+      status: isPendingApproval ? 'pending_approval' : 'active'
     }
   });
 
@@ -450,7 +454,7 @@ export const signupUser = async (data, file) => {
       phone: phone || '',
       clientType: accountType === 'saas' ? 'SaaS' : 'Business',
       source: file ? file.filename : null,
-      status: 'active'
+      status: isPendingApproval ? 'pending_approval' : 'active'
     }
   });
 

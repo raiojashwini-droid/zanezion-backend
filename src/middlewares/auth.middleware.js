@@ -172,7 +172,7 @@ export const checkPermission = (routeIdentifier, action) => {
           return next();
         }
 
-        const allowedWriteRoles = ['super_admin', 'superadmin', 'admin', 'saas_client', 'saas client', 'business_client', 'business client', 'client'];
+        const allowedWriteRoles = ['super_admin', 'superadmin', 'admin', 'saas_client', 'saas client', 'business_client', 'business client', 'client', 'inventory', 'inventory_manager', 'inventory manager'];
         const isAllowedWrite = allowedWriteRoles.includes(roleNameLower);
 
         if (!isAllowedWrite) {

@@ -66,9 +66,9 @@ export const getItemById = async (id, tenantId) => {
   if (!item) {
     throw new AppError('Item not found', 404);
   }
-  const hasAccess = tenantId === null || 
-                    (Array.isArray(tenantId) ? tenantId.map(Number).includes(Number(item?.tenantId)) : Number(item?.tenantId) === Number(tenantId)) ||
-                    (item.clientId != null);
+  const hasAccess = tenantId === null ||
+    (Array.isArray(tenantId) ? tenantId.map(Number).includes(Number(item?.tenantId)) : Number(item?.tenantId) === Number(tenantId)) ||
+    (item.clientId != null);
   if (!hasAccess) {
     throw new AppError('Item not found', 404);
   }

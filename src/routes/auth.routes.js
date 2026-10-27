@@ -5,9 +5,30 @@ import { loginSchema, forgotPasswordSchema, resetPasswordSchema, changePasswordS
 import { authenticate } from '../middlewares/auth.middleware.js';
 
 import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
+import crypto from 'crypto';
 
 const router = express.Router();
-const upload = multer({ dest: 'uploads/' });
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = path.join(process.cwd(), 'uploads');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => {
+    const safeExt = path.extname(file.originalname).toLowerCase() || '.bin';
+    const prefix = file.fieldname === 'businessLicense'
+      ? 'businessLicense_'
+      : file.fieldname === 'profile_pic'
+        ? 'profilePic_'
+        : `${file.fieldname}_`;
+    const randomHex = crypto.randomBytes(6).toString('hex');
+    cb(null, `${prefix}${Date.now()}_${randomHex}${safeExt}`);
+  }
+});
+const upload = multer({ storage, limits: { fileSize: 10 * 1024 * 1024 } });
 
 router.post('/signup', upload.single('businessLicense'), validate(signupSchema), authController.signup);
 router.post('/staff-register', upload.fields([

@@ -55,19 +55,20 @@ export const createOrder = async (data, performerId, tenantId) => {
   const { items, ...orderData } = data;
 
   let client = null;
+  let performerUser = null;
 
   // If order is created by a customer, strictly prioritize their dedicated client record on their tenant
   if (performerId) {
-    const user = await prisma.user.findUnique({
+    performerUser = await prisma.user.findUnique({
       where: { id: Number(performerId) },
       include: { role: true }
     });
-    const roleName = String(user?.role?.name || user?.role || '').toUpperCase();
-    if (['CUSTOMER', 'INDIVIDUAL_CLIENT'].includes(roleName) && user?.email) {
+    const roleName = String(performerUser?.role?.name || performerUser?.role || '').toUpperCase();
+    if (['CUSTOMER', 'INDIVIDUAL_CLIENT'].includes(roleName) && performerUser?.email) {
       client = await prisma.client.findFirst({
-        where: { email: user.email, tenantId: user.tenantId }
+        where: { email: performerUser.email, tenantId: performerUser.tenantId }
       }) || await prisma.client.findFirst({
-        where: { email: user.email }
+        where: { email: performerUser.email }
       });
       if (client) {
         orderData.clientId = client.id;
@@ -328,9 +329,33 @@ export const createOrder = async (data, performerId, tenantId) => {
     };
   }
 
-  const employee = await prisma.employee.findUnique({ where: { userId: performerId } });
+  const employee = performerId ? await prisma.employee.findUnique({ where: { userId: Number(performerId) } }) : null;
+  // createdById satisfies the Prisma schema non-nullable foreign key to Employee (creator Employee)
   orderData.createdById = employee ? employee.id : 1;
   orderData.status = data.status || 'created';
+
+  // Record verified customer ownership in metadata without assigning employee ID as customer identity
+  const performerRoleName = String(performerUser?.role?.name || performerUser?.role || '').toUpperCase();
+  const isCustomerPerformer = ['CUSTOMER', 'INDIVIDUAL_CLIENT'].includes(performerRoleName);
+
+  if (performerUser && (isCustomerPerformer || !employee)) {
+    orderData.metadata = {
+      ...(orderData.metadata || {}),
+      customer_id: performerUser.id,
+      customer_user_id: performerUser.id,
+      user_id: performerUser.id,
+      userId: performerUser.id,
+      customer_email: performerUser.email,
+      email: performerUser.email,
+      created_by_customer_id: performerUser.id
+    };
+  } else if (employee) {
+    orderData.metadata = {
+      ...(orderData.metadata || {}),
+      employeeCreatorId: employee.id,
+      employeeUserId: Number(performerId)
+    };
+  }
 
   const typeStrLower = String(data.orderType || data.type || orderData.orderType || '').toLowerCase();
   if (isMarketplaceOrder || typeStrLower.includes('marketplace') || typeStrLower.includes('delivery')) {
@@ -659,7 +684,8 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
   }
 
   // Preserve customer and client identity fields in metadata
-  const originalCustomerId = metadataObj.userId || metadataObj.user_id || metadataObj.customer_id || metadataObj.created_by || (metadataObj.customItems?.[0]?.userId) || (metadataObj.custom_items?.[0]?.user_id) || order.createdById;
+  // Do not fall back to order.createdById as customer identity, as createdById references an Employee
+  const originalCustomerId = metadataObj.userId || metadataObj.user_id || metadataObj.customer_id || (metadataObj.created_by && metadataObj.created_by !== 1 ? metadataObj.created_by : null) || (metadataObj.customItems?.[0]?.userId) || (metadataObj.custom_items?.[0]?.user_id) || null;
   const originalCustomerEmail = metadataObj.customer_email || metadataObj.email || metadataObj.clientEmail || (metadataObj.client && metadataObj.client.email) || (metadataObj.customItems?.[0]?.email) || (metadataObj.custom_items?.[0]?.email) || null;
   const originalClientName = metadataObj.clientName || metadataObj.client_name || (metadataObj.client && metadataObj.client.companyName) || null;
   const originalClientObj = metadataObj.client || (order.client ? {

@@ -51,7 +51,15 @@ export const clearAuthCache = () => {
 
 export const authenticate = async (req, res, next) => {
   try {
-    const token = req.headers.authorization?.split(' ')[1];
+    const authHeader = req.headers.authorization;
+    let token = null;
+    if (authHeader && authHeader.startsWith('Bearer ')) {
+      token = authHeader.split(' ')[1];
+    } else if (req.headers['x-access-token']) {
+      token = req.headers['x-access-token'];
+    } else if (req.query?.token) {
+      token = req.query.token;
+    }
 
     if (!token) {
       return sendResponse(res, 401, 'Authentication required');

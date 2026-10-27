@@ -9,16 +9,17 @@ export const globalErrorHandler = (err, req, res, next) => {
     console.error('ERROR 💥', err);
   }
 
-  // Handle Prisma errors specifically if needed
+  // Handle Prisma errors specifically to prevent database exposure
   if (err.name === 'PrismaClientKnownRequestError') {
     if (err.code === 'P2002') {
       err.message = 'Duplicate field value entered';
       err.statusCode = 400;
     }
-// if (err.code === 'P2003') {
-    //   err.message = 'Cannot delete this record because it is currently in use or has associated history.';
-    //   err.statusCode = 400;
-    // }
+  } else if (err.name === 'PrismaClientInitializationError' || err.name === 'PrismaClientRustPanicError') {
+    err.statusCode = 500;
+    err.message = 'Database service temporarily unavailable';
+  } else if (err.statusCode === 500 && process.env.NODE_ENV === 'production') {
+    err.message = 'Internal Server Error';
   }
 
   sendResponse(res, err.statusCode, err.message);

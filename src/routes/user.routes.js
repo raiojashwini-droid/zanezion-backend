@@ -17,6 +17,7 @@ router.get('/', checkPermission('USERS', 'READ'), userController.getUsers);
 router.get('/customers', checkPermission('USERS', 'READ'), userController.getCustomers);
 
 router.get('/:id', checkPermission('USERS', 'READ'), userController.getUserById);
+router.get('/:id/banking', userController.getUserBankingInfo);
 
 // Must have create users permission
 router.post('/', checkPermission('USERS', 'CREATE'), enforceSubscriptionLimits, validate(createUserSchema), userController.createUser);

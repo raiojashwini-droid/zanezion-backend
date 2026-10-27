@@ -478,6 +478,18 @@ export const registerStaff = async (data, files) => {
 
   // Use a transaction to ensure both User and Employee are created together
   const user = await prisma.$transaction(async (tx) => {
+    const bankingInfoData = (bank_name || account_number) ? {
+      bank: bank_name || '',
+      account: account_number || '',
+      routing: routing_number || '',
+      method: 'Direct Deposit'
+    } : null;
+
+    const passportFile = files?.passport?.[0]?.filename;
+    const licenseFile = files?.license?.[0]?.filename;
+    const nibFile = files?.nib_doc?.[0]?.filename;
+    const profilePicFile = files?.profile_pic?.[0]?.filename;
+
     const newUser = await tx.user.create({
       data: {
         name,
@@ -485,20 +497,33 @@ export const registerStaff = async (data, files) => {
         password: hashedPassword,
         phone,
         roleId: roleRecord.id,
-        status: 'pending' // Staff approval flow
+        tenantId: 1, // Default HQ tenant for staff registrations
+        status: 'pending', // Staff approval flow
+        birthday: birthday ? new Date(birthday) : null,
+        nibNumber: nib_number || null,
+        employmentStatus: employment_status || 'Full Time',
+        bankingInfo: bankingInfoData,
+        hasPassport: !!passportFile,
+        hasLicense: !!licenseFile,
+        hasNIB: !!nibFile,
+        hasProfilePic: !!profilePicFile,
+        passportUrl: passportFile ? `/uploads/${passportFile}` : null,
+        licenseUrl: licenseFile ? `/uploads/${licenseFile}` : null,
+        nibUrl: nibFile ? `/uploads/${nibFile}` : null,
+        avatar: profilePicFile ? `/uploads/${profilePicFile}` : null
       }
     });
 
     await tx.employee.create({
       data: {
         userId: newUser.id,
+        tenantId: 1,
         firstName: name.split(' ')[0] || name,
         lastName: name.split(' ').slice(1).join(' ') || '',
         email,
         phone,
         status: 'pending',
         employmentType: employment_status || 'Full Time',
-        // Optional tracking data can be added here
       }
     });
 

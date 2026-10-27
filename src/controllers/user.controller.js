@@ -2,6 +2,7 @@ import * as userService from '../services/user.service.js';
 import { sendResponse } from '../utils/response.js';
 import cloudinary from '../config/cloudinary.js';
 import { resolveTenantId } from '../utils/tenantResolver.js';
+import { logAudit } from '../utils/audit.js';
 import fs from 'fs';
 import path from 'path';
 
@@ -87,9 +88,64 @@ export const getCustomers = async (req, res, next) => {
 export const getUserById = async (req, res, next) => {
   try {
     const tenantIdToFilter = resolveTenantId(req);
+    const targetId = Number(req.params.id);
 
-    const user = await userService.getUserById(Number(req.params.id), tenantIdToFilter);
+    const user = await userService.getUserById(targetId, tenantIdToFilter);
+
+    // Enforce server-side sensitive field protection on individual user retrieval
+    const isOwner = req.user && req.user.id === targetId;
+    const requesterRole = String(req.user?.role?.name || '').toUpperCase();
+    const isSuperAdmin = requesterRole === 'SUPER_ADMIN' || requesterRole === 'SUPERADMIN';
+    const isTenantAdminOrHR = ['ADMIN', 'HR', 'HR_MANAGER'].includes(requesterRole) &&
+      (req.user?.tenantId === user.tenantId || req.user?.tenantId === 1);
+
+    if (!isOwner && !isSuperAdmin && !isTenantAdminOrHR) {
+      delete user.bankingInfo;
+      delete user.nibNumber;
+      delete user.passportUrl;
+      delete user.licenseUrl;
+      delete user.nibUrl;
+      delete user.resumeUrl;
+      delete user.certsUrl;
+    }
+
     sendResponse(res, 200, 'User fetched successfully', user);
+  } catch (error) {
+    next(error);
+  }
+};
+
+export const getUserBankingInfo = async (req, res, next) => {
+  try {
+    const targetId = Number(req.params.id);
+    const tenantIdToFilter = resolveTenantId(req);
+
+    const user = await userService.getUserById(targetId, tenantIdToFilter);
+    if (!user) {
+      return sendResponse(res, 404, 'User not found');
+    }
+
+    const isOwner = req.user && req.user.id === targetId;
+    const requesterRole = String(req.user?.role?.name || '').toUpperCase();
+    const isSuperAdmin = requesterRole === 'SUPER_ADMIN' || requesterRole === 'SUPERADMIN';
+    const isTenantAdminOrHR = ['ADMIN', 'HR', 'HR_MANAGER'].includes(requesterRole) &&
+      (req.user?.tenantId === user.tenantId || req.user?.tenantId === 1);
+
+    if (!isOwner && !isSuperAdmin && !isTenantAdminOrHR) {
+      return sendResponse(res, 403, 'Forbidden: You do not have permission to view sensitive banking data');
+    }
+
+    await logAudit({
+      module: 'USERS',
+      action: 'VIEW_SENSITIVE_DATA',
+      description: `Accessed banking information for user ID ${targetId}`,
+      performedBy: req.user.id
+    });
+
+    sendResponse(res, 200, 'Banking information retrieved successfully', {
+      userId: user.id,
+      bankingInfo: user.bankingInfo || null
+    });
   } catch (error) {
     next(error);
   }
@@ -167,6 +223,15 @@ export const uploadDocument = async (req, res, next) => {
     const { type } = req.query;
     if (!req.file) {
       return sendResponse(res, 400, 'No file uploaded');
+    }
+
+    const isOwner = req.user && req.user.id === userId;
+    const requesterRole = String(req.user?.role?.name || '').toUpperCase();
+    const isSuperAdmin = requesterRole === 'SUPER_ADMIN' || requesterRole === 'SUPERADMIN';
+    const isTenantAdminOrHR = ['ADMIN', 'HR', 'HR_MANAGER', 'OPERATIONS'].includes(requesterRole);
+
+    if (!isOwner && !isSuperAdmin && !isTenantAdminOrHR) {
+      return sendResponse(res, 403, 'Forbidden: You do not have permission to upload documents for another user');
     }
 
     const documentTypes = {

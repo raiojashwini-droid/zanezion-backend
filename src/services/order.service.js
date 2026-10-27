@@ -867,8 +867,78 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
     if (c0.amenities) metadataExt.amenities = c0.amenities;
   }
 
+  // --- Address Alias Normalization & Partial Update Resolution ---
+  const incomingMeta = typeof data.metadata === 'object' && data.metadata !== null
+    ? data.metadata
+    : (typeof data.metadata === 'string' ? (() => { try { return JSON.parse(data.metadata); } catch (_) { return {}; } })() : {});
+  delete metadataExt.metadata;
+
+  const firstCustomItem = (formattedCustomItems && formattedCustomItems[0]) ||
+    (Array.isArray(data.customItems) && data.customItems[0]) ||
+    (Array.isArray(data.items) && data.items[0]) ||
+    (incomingMeta && Array.isArray(incomingMeta.customItems) && incomingMeta.customItems[0]) ||
+    null;
+
+  const getFirstDefined = (...candidates) => {
+    for (const c of candidates) {
+      if (c !== undefined) return c;
+    }
+    return undefined;
+  };
+
+  const incomingPickup = getFirstDefined(
+    data.pickupLocation,
+    data.pickup_location,
+    data.pickup,
+    incomingMeta.pickupLocation,
+    incomingMeta.pickup_location,
+    incomingMeta.pickup,
+    firstCustomItem?.pickupLocation,
+    firstCustomItem?.pickup_location,
+    firstCustomItem?.pickup
+  );
+
+  const incomingDrop = getFirstDefined(
+    data.dropLocation,
+    data.drop_location,
+    data.location,
+    data.deliveryAddress,
+    data.delivery_address,
+    data.drop,
+    incomingMeta.dropLocation,
+    incomingMeta.drop_location,
+    incomingMeta.location,
+    incomingMeta.deliveryAddress,
+    incomingMeta.delivery_address,
+    incomingMeta.drop,
+    firstCustomItem?.dropLocation,
+    firstCustomItem?.drop_location,
+    firstCustomItem?.location,
+    firstCustomItem?.deliveryAddress,
+    firstCustomItem?.delivery_address,
+    firstCustomItem?.drop
+  );
+
+  let resolvedPickup = undefined;
+  if (incomingPickup !== undefined) {
+    resolvedPickup = incomingPickup !== null ? String(incomingPickup).trim() : null;
+    metadataExt.pickupLocation = resolvedPickup;
+    metadataExt.pickup_location = resolvedPickup;
+    delete metadataExt.pickup;
+  }
+
+  let resolvedDrop = undefined;
+  if (incomingDrop !== undefined) {
+    resolvedDrop = incomingDrop !== null ? String(incomingDrop).trim() : null;
+    metadataExt.dropLocation = resolvedDrop;
+    metadataExt.drop_location = resolvedDrop;
+    metadataExt.location = resolvedDrop;
+    metadataExt.deliveryAddress = resolvedDrop;
+    delete metadataExt.delivery_address;
+    delete metadataExt.drop;
+  }
+
   // --- Resolve Driver and Vehicle Assignment ---
-  const incomingMeta = typeof data.metadata === 'object' && data.metadata ? data.metadata : {};
   let driverUserId = data.driver_user_id || data.driverId || metadataExt.driver_user_id || metadataExt.driverId || incomingMeta.driver_user_id || incomingMeta.driverId || metadataObj.driver_user_id || metadataObj.driverId;
   let driverName = data.driverName || metadataExt.driverName || incomingMeta.driverName || metadataObj.driverName;
   let plateNumber = data.plateNumber || data.vehicleId || data.vehicle || metadataExt.plateNumber || metadataExt.vehicleId || metadataExt.vehicle || incomingMeta.plateNumber || incomingMeta.vehicleId || incomingMeta.vehicle || metadataObj.plateNumber || metadataObj.vehicleId;
@@ -920,21 +990,33 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
     metadataExt.vehicle = String(plateNumber).trim();
   }
 
-  const targetCustomItems = metadataExt.customItems || formattedCustomItems || (Array.isArray(metadataObj.customItems) ? metadataObj.customItems : []);
+  const targetCustomItems = metadataExt.customItems || formattedCustomItems || (Array.isArray(metadataObj.customItems) ? [...metadataObj.customItems] : []);
   if (Array.isArray(targetCustomItems) && targetCustomItems.length > 0) {
     if (targetCustomItems[0]) {
+      const cItem = { ...targetCustomItems[0] };
       if (plateNumber) {
-        targetCustomItems[0].plateNumber = String(plateNumber).trim();
-        targetCustomItems[0].vehicleId = String(plateNumber).trim();
-        targetCustomItems[0].vehicle = String(plateNumber).trim();
+        cItem.plateNumber = String(plateNumber).trim();
+        cItem.vehicleId = String(plateNumber).trim();
+        cItem.vehicle = String(plateNumber).trim();
       }
       if (driverName) {
-        targetCustomItems[0].driverName = driverName;
+        cItem.driverName = driverName;
       }
       if (driverUserId) {
-        targetCustomItems[0].driver_user_id = driverUserId;
-        targetCustomItems[0].driverId = driverUserId;
+        cItem.driver_user_id = driverUserId;
+        cItem.driverId = driverUserId;
       }
+      if (incomingPickup !== undefined) {
+        cItem.pickupLocation = resolvedPickup;
+        cItem.pickup_location = resolvedPickup;
+      }
+      if (incomingDrop !== undefined) {
+        cItem.dropLocation = resolvedDrop;
+        cItem.drop_location = resolvedDrop;
+        cItem.location = resolvedDrop;
+        cItem.deliveryAddress = resolvedDrop;
+      }
+      targetCustomItems[0] = cItem;
     }
     metadataExt.customItems = targetCustomItems;
   }
@@ -953,8 +1035,10 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
 
   const finalMetadata = {
     ...metadataObj,
+    ...incomingMeta,
     ...metadataExt
   };
+  delete finalMetadata.metadata;
 
   const updatedOrder = await prisma.order.update({
     where: { id: order.id },
@@ -965,41 +1049,66 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
     }
   });
 
-  // Cross-table synchronization: Sync Driver & Vehicle to Delivery
+  // Cross-table synchronization: Sync Driver, Vehicle & Addresses to Delivery
   const isChauffeurOrDelivery = ['CHAUFFEUR', 'PRODUCT', 'DELIVERY', 'CONCIERGE'].includes(String(updatedOrder.orderType || '').toUpperCase());
-  if (isChauffeurOrDelivery && (driverName || driverUserId || plateNumber || employee)) {
+  const hasDriverOrVehicle = Boolean(driverName || driverUserId || plateNumber || employee);
+  const hasAddressUpdate = incomingPickup !== undefined || incomingDrop !== undefined;
+
+  if (isChauffeurOrDelivery && (hasDriverOrVehicle || hasAddressUpdate)) {
     try {
-      const existingDelivery = await prisma.delivery.findFirst({
-        where: { orderId: order.id }
+      const existingDeliveries = await prisma.delivery.findMany({
+        where: {
+          orderId: order.id,
+          tenantId: order.tenantId
+        }
       });
 
-      const delStatus = ['completed', 'delivered'].includes(newStatus)
-        ? 'delivered'
-        : (newStatus === 'en_route' ? 'en_route' : (['in_transit', 'en_route'].includes(newStatus) ? 'in_transit' : 'assigned'));
+      if (existingDeliveries.length > 0) {
+        for (const existingDelivery of existingDeliveries) {
+          let existingRemarks = {};
+          if (existingDelivery.remarks) {
+            try { existingRemarks = JSON.parse(existingDelivery.remarks); } catch (_) {}
+          }
+          if (formattedCustomItems.length > 0) {
+            existingRemarks.manifestItems = formattedCustomItems;
+          }
 
-      if (existingDelivery) {
-        let existingRemarks = {};
-        if (existingDelivery.remarks) {
-          try { existingRemarks = JSON.parse(existingDelivery.remarks); } catch (_) {}
-        }
-        if (formattedCustomItems.length > 0) {
-          existingRemarks.manifestItems = formattedCustomItems;
-        }
-        await prisma.delivery.update({
-          where: { id: existingDelivery.id },
-          data: {
+          let targetDelStatus = existingDelivery.status;
+          if (data.status) {
+            targetDelStatus = ['completed', 'delivered'].includes(newStatus)
+              ? 'delivered'
+              : (newStatus === 'en_route' ? 'en_route' : (['in_transit', 'en_route'].includes(newStatus) ? 'in_transit' : 'assigned'));
+          } else if (hasDriverOrVehicle && ['pending', 'pending_review', 'created', 'draft'].includes(String(existingDelivery.status || '').toLowerCase())) {
+            targetDelStatus = 'assigned';
+          }
+
+          const deliveryUpdateData = {
             ...(employee ? { assignedTo: employee.id } : {}),
             ...(plateNumber ? { vehicleRef: String(plateNumber).trim() } : {}),
+            ...(incomingPickup !== undefined ? { pickupLocation: resolvedPickup } : {}),
+            ...(incomingDrop !== undefined ? { dropLocation: resolvedDrop } : {}),
             remarks: JSON.stringify(existingRemarks),
-            status: delStatus
-          }
-        });
+            status: targetDelStatus
+          };
+
+          await prisma.delivery.update({
+            where: { id: existingDelivery.id },
+            data: deliveryUpdateData
+          });
+        }
       } else {
         const deliveryCount = await prisma.delivery.count({ where: { tenantId: updatedOrder.tenantId } });
         const deliveryNumber = `DEL-${new Date().getFullYear()}-${String(deliveryCount + 1).padStart(4, '0')}`;
 
         let warehouse = await prisma.warehouse.findFirst({ where: { tenantId: updatedOrder.tenantId } });
         if (!warehouse) warehouse = await prisma.warehouse.findFirst();
+
+        let initialDelStatus = hasDriverOrVehicle ? 'assigned' : 'pending';
+        if (data.status) {
+          initialDelStatus = ['completed', 'delivered'].includes(newStatus)
+            ? 'delivered'
+            : (newStatus === 'en_route' ? 'en_route' : (['in_transit', 'en_route'].includes(newStatus) ? 'in_transit' : 'assigned'));
+        }
 
         await prisma.delivery.create({
           data: {
@@ -1009,7 +1118,7 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
             clientId: updatedOrder.clientId,
             assignedTo: employee ? employee.id : null,
             warehouseId: warehouse ? warehouse.id : 1,
-            status: delStatus,
+            status: initialDelStatus,
             missionType: updatedOrder.orderType === 'CHAUFFEUR' ? 'Chauffeur' : 'Delivery',
             transportMode: 'Road',
             vehicleRef: plateNumber ? String(plateNumber).trim() : null,
@@ -1036,7 +1145,7 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
     if (employee) {
       try {
         const existingMission = await prisma.mission.findFirst({
-          where: { orderId: id }
+          where: { orderId: order.id }
         });
         if (existingMission) {
           await prisma.mission.update({
@@ -1062,11 +1171,11 @@ export const updateOrder = async (id, data, tenantId, performerId) => {
 
   if (['cancelled', 'rejected', 'canceled'].includes(newStatus)) {
     await prisma.delivery.updateMany({
-      where: { orderId: id },
+      where: { orderId: order.id },
       data: { status: 'cancelled' }
     }).catch(() => null);
     await prisma.mission.updateMany({
-      where: { orderId: id },
+      where: { orderId: order.id },
       data: { status: 'cancelled' }
     }).catch(() => null);
   }

@@ -8,6 +8,20 @@ import prisma from '../config/db.js';
 export const createDelivery = async (data, performerId, tenantId) => {
   const { items, ...deliveryData } = data;
 
+  // Normalize pickup and drop-off aliases
+  if (deliveryData.pickupLocation === undefined && (deliveryData.pickup_location !== undefined || deliveryData.pickup !== undefined)) {
+    deliveryData.pickupLocation = deliveryData.pickup_location !== undefined ? deliveryData.pickup_location : deliveryData.pickup;
+  }
+  if (deliveryData.dropLocation === undefined && (deliveryData.drop_location !== undefined || deliveryData.location !== undefined || deliveryData.deliveryAddress !== undefined || deliveryData.delivery_address !== undefined || deliveryData.drop !== undefined)) {
+    deliveryData.dropLocation = deliveryData.drop_location !== undefined
+      ? deliveryData.drop_location
+      : (deliveryData.location !== undefined
+        ? deliveryData.location
+        : (deliveryData.deliveryAddress !== undefined
+          ? deliveryData.deliveryAddress
+          : (deliveryData.delivery_address !== undefined ? deliveryData.delivery_address : deliveryData.drop)));
+  }
+
   // Only keep fields that exist in the Delivery Prisma model to prevent
   // unknown fields (client, companyId, customerId, etc.) from crashing Prisma
   const validDeliveryFields = [
@@ -195,8 +209,18 @@ export const createDelivery = async (data, performerId, tenantId) => {
     }
     if (data.missionType) orderMetadata.missionType = data.missionType;
     if (data.transportMode) orderMetadata.transportMode = data.transportMode;
-    if (data.pickupLocation) orderMetadata.pickupLocation = data.pickupLocation;
-    if (data.dropLocation) orderMetadata.dropLocation = data.dropLocation;
+    const resolvedCreatePickup = data.pickupLocation || data.pickup_location || data.pickup;
+    if (resolvedCreatePickup) {
+      orderMetadata.pickupLocation = resolvedCreatePickup;
+      orderMetadata.pickup_location = resolvedCreatePickup;
+    }
+    const resolvedCreateDrop = data.dropLocation || data.drop_location || data.location || data.deliveryAddress || data.delivery_address || data.drop;
+    if (resolvedCreateDrop) {
+      orderMetadata.dropLocation = resolvedCreateDrop;
+      orderMetadata.drop_location = resolvedCreateDrop;
+      orderMetadata.location = resolvedCreateDrop;
+      orderMetadata.deliveryAddress = resolvedCreateDrop;
+    }
 
     order = await orderRepo.createOrder({
       orderNumber: orderNumberToUse,
@@ -524,6 +548,37 @@ export const updateDelivery = async (id, data, tenantId, performerId, clientId =
     delete parsedData.mode;
   }
 
+  // Normalize pickup address aliases
+  if (parsedData.pickupLocation !== undefined || parsedData.pickup_location !== undefined || parsedData.pickup !== undefined) {
+    const rawPickup = parsedData.pickupLocation !== undefined
+      ? parsedData.pickupLocation
+      : (parsedData.pickup_location !== undefined ? parsedData.pickup_location : parsedData.pickup);
+    parsedData.pickupLocation = rawPickup !== null ? String(rawPickup).trim() : null;
+    delete parsedData.pickup_location;
+    delete parsedData.pickup;
+  }
+
+  // Normalize drop-off address aliases
+  if (parsedData.dropLocation !== undefined || parsedData.drop_location !== undefined || parsedData.location !== undefined || parsedData.deliveryAddress !== undefined || parsedData.delivery_address !== undefined || parsedData.drop !== undefined) {
+    const rawDrop = parsedData.dropLocation !== undefined
+      ? parsedData.dropLocation
+      : (parsedData.drop_location !== undefined
+        ? parsedData.drop_location
+        : (parsedData.location !== undefined
+          ? parsedData.location
+          : (parsedData.deliveryAddress !== undefined
+            ? parsedData.deliveryAddress
+            : (parsedData.delivery_address !== undefined
+              ? parsedData.delivery_address
+              : parsedData.drop))));
+    parsedData.dropLocation = rawDrop !== null ? String(rawDrop).trim() : null;
+    delete parsedData.drop_location;
+    delete parsedData.location;
+    delete parsedData.deliveryAddress;
+    delete parsedData.delivery_address;
+    delete parsedData.drop;
+  }
+
   // Remove any remaining unknown keys not in schema
   const allowedKeys = [
     'orderId', 'clientId', 'assignedTo', 'warehouseId', 'status',
@@ -602,8 +657,8 @@ export const updateDelivery = async (id, data, tenantId, performerId, clientId =
     updatedDelivery = await deliveryRepo.updateDelivery(targetDeliveryId, parsedData);
   }
 
-  // Cross-portal synchronization: Update linked Order with driver and vehicle
-  if (delivery.orderId) {
+  // Cross-portal synchronization: Update linked Order with driver, vehicle, and addresses
+  if (delivery.orderId && !isNaN(Number(delivery.orderId)) && Number(delivery.orderId) > 0) {
     let orderTargetStatus = null;
     const normDelStatus = String(data.status || parsedData.status || '').toLowerCase().replace(/\s+/g, '_');
     if (['delivered', 'completed'].includes(normDelStatus)) {
@@ -619,7 +674,12 @@ export const updateDelivery = async (id, data, tenantId, performerId, clientId =
     }
 
     try {
-      const existingOrder = await prisma.order.findUnique({ where: { id: delivery.orderId } });
+      const existingOrder = await prisma.order.findFirst({
+        where: {
+          id: Number(delivery.orderId),
+          tenantId: delivery.tenantId
+        }
+      });
       if (existingOrder) {
         let orderMeta = typeof existingOrder.metadata === 'string' ? JSON.parse(existingOrder.metadata) : (existingOrder.metadata || {});
 
@@ -649,8 +709,50 @@ export const updateDelivery = async (id, data, tenantId, performerId, clientId =
           ...(finalVehicleRef ? { plateNumber: finalVehicleRef, vehicleId: finalVehicleRef, vehicle: finalVehicleRef } : {})
         };
 
+        if (parsedData.pickupLocation !== undefined) {
+          updatedOrderMeta.pickupLocation = parsedData.pickupLocation;
+          updatedOrderMeta.pickup_location = parsedData.pickupLocation;
+        }
+
+        if (parsedData.dropLocation !== undefined) {
+          updatedOrderMeta.dropLocation = parsedData.dropLocation;
+          updatedOrderMeta.drop_location = parsedData.dropLocation;
+          updatedOrderMeta.location = parsedData.dropLocation;
+          updatedOrderMeta.deliveryAddress = parsedData.dropLocation;
+        }
+
+        if (Array.isArray(updatedOrderMeta.customItems) && updatedOrderMeta.customItems.length > 0 && updatedOrderMeta.customItems[0]) {
+          const c0 = { ...updatedOrderMeta.customItems[0] };
+          if (parsedData.pickupLocation !== undefined) {
+            c0.pickupLocation = parsedData.pickupLocation;
+            c0.pickup_location = parsedData.pickupLocation;
+          }
+          if (parsedData.dropLocation !== undefined) {
+            c0.dropLocation = parsedData.dropLocation;
+            c0.drop_location = parsedData.dropLocation;
+            c0.location = parsedData.dropLocation;
+            c0.deliveryAddress = parsedData.dropLocation;
+          }
+          if (finalVehicleRef) {
+            c0.plateNumber = finalVehicleRef;
+            c0.vehicleId = finalVehicleRef;
+            c0.vehicle = finalVehicleRef;
+          }
+          if (driverName) {
+            c0.driverName = driverName;
+          }
+          if (driverUserId) {
+            c0.driver_user_id = driverUserId;
+            c0.driverId = driverUserId;
+          }
+          updatedOrderMeta.customItems = [
+            c0,
+            ...updatedOrderMeta.customItems.slice(1)
+          ];
+        }
+
         await prisma.order.update({
-          where: { id: delivery.orderId },
+          where: { id: existingOrder.id },
           data: {
             ...(orderTargetStatus ? { status: orderTargetStatus } : {}),
             metadata: updatedOrderMeta
